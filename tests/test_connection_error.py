@@ -20,11 +20,11 @@ import psycopg
 import pytest
 
 from genro_sqlmigration import SqlMigrator
-from genro_sqlmigration.db_extractor import DbExtractor
 from genro_sqlmigration.exceptions import (
     NonExistingDbException,
     SqlConnectionException,
 )
+from genro_sqlmigration.readers import PgReader
 
 from .support.pg_database import PgTestAdapter
 
@@ -72,25 +72,25 @@ class TestAdapterConnectionError:
         assert 'Connection refused' in msg
 
 
-class TestDbExtractorConnectionError:
-    """get_info_from_db: missing DB -> False; connection error -> re-raised."""
+class TestReaderConnectionError:
+    """get_json_struct: missing DB -> {}; connection error -> re-raised."""
 
-    def _extractor(self, connect_side_effect):
-        migrator = MagicMock()
-        migrator.db.adapter.connect.side_effect = connect_side_effect
-        return DbExtractor(migrator=migrator)
+    def _reader(self, connect_side_effect):
+        reader = PgReader(connection_params={'dbname': 'mydb'})
+        reader.connect = MagicMock(side_effect=connect_side_effect)
+        return reader
 
-    def test_nonexisting_db_returns_false(self):
-        extractor = self._extractor(NonExistingDbException('mydb'))
-        assert extractor.get_info_from_db(schemas=['alfa']) is False
+    def test_nonexisting_db_returns_empty(self):
+        reader = self._reader(NonExistingDbException('mydb'))
+        assert reader.get_json_struct('mydb', schemas=['alfa']) == {}
 
     def test_connection_error_propagates(self):
         conn_error = SqlConnectionException(
             'mydb', original_error=Exception('No route to host')
         )
-        extractor = self._extractor(conn_error)
+        reader = self._reader(conn_error)
         with pytest.raises(SqlConnectionException) as exc_info:
-            extractor.get_info_from_db(schemas=['alfa'])
+            reader.get_json_struct('mydb', schemas=['alfa'])
         assert exc_info.value is conn_error
 
 

@@ -37,12 +37,11 @@ Complete migration flow
     SqlMigrator
         |
         +-- __init__()
-        |   +-- DbExtractor(migrator=self)
         |   +-- OrmExtractor(migrator=self, extensions=...)
         |
         +-- prepareStructures()
         |   +-- extractOrm() -> ormExtractor.get_json_struct()
-        |   +-- extractSql() -> dbExtractor.get_json_struct(schemas)
+        |   +-- extractSql() -> db.adapter.reader.get_json_struct(dbname, schemas)
         |
         +-- prepareMigrationCommands()  [uses DiffMixin + CommandBuilderMixin]
         |   +-- dictDifferChanges()  -> added/changed/removed events
@@ -100,7 +99,6 @@ Typical usage example::
 """
 
 from .command_builder import CommandBuilderMixin
-from .db_extractor import DbExtractor
 from .diff_engine import DiffMixin
 from .exceptions import NonExistingDbException
 from .executor import ExecutorMixin
@@ -155,7 +153,6 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
         self.force = force or backup  # backup implies force
         self.backup = backup
         self.ormStructure = {}
-        self.dbExtractor = DbExtractor(migrator=self)
 
     def prepareMigrationCommands(self):
         """Prepare migration commands by comparing ORM and DB.
@@ -231,7 +228,7 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
         Args:
             schemas: List of schemas to inspect.
         """
-        self.sqlStructure = self.dbExtractor.get_json_struct(schemas=schemas)
+        self.sqlStructure = self.db.adapter.reader.get_json_struct(self.db.get_dbname(), schemas=schemas)
 
     def clearSql(self):
         """Reset the SQL structure extracted from the database."""

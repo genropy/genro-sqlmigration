@@ -7,7 +7,7 @@ These run without a database and pin the backports listed in
 - bugs #1/#2: ``new_relation_item``/``new_index_item`` must not mutate the
   caller's attributes dict;
 - bug #3: each multi-column UNIQUE constraint keeps its own name in
-  ``DbExtractor.process_constraints`` (no stale loop variable);
+  ``BaseReader.process_constraints`` (no stale loop variable);
 - bug #4: ``changed_constraint`` reads ``constraint_name`` from the entity
   attributes, not from the commands nested defaultdict.
 
@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 from genro_sqlmigration import SqlMigrator, new_index_item, new_relation_item
 from genro_sqlmigration.command_builder import CommandBuilderMixin
-from genro_sqlmigration.db_extractor import DbExtractor
+from genro_sqlmigration.readers import PgReader
 from genro_sqlmigration.structures import nested_defaultdict
 
 
@@ -71,14 +71,14 @@ class TestFactoryMutation:
         )
 
 
-class TestDbExtractorConstraints:
+class TestReaderConstraints:
     """Bug #3: stale loop variable in multi-column UNIQUE processing."""
 
     def test_multi_unique_constraint_uses_own_constraint_name(self):
         """When two multi-column UNIQUE constraints exist, each should use
         its own constraint_name — not the last value of ``v`` from the
         previous loop."""
-        extractor = DbExtractor.__new__(DbExtractor)
+        extractor = PgReader.__new__(PgReader)
 
         extractor.json_schemas = {
             'myschema': {

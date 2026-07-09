@@ -115,8 +115,13 @@ class BaseAdapter(ABC):
     def struct_drop_constraint_sql(self, constraint_name, **kwargs):
         ...
 
-    @abstractmethod
     def struct_is_empty_column(self, schema_name, table_name, column_name):
+        return self.reader.is_empty_column(schema_name, table_name, column_name)
+
+    @property
+    @abstractmethod
+    def reader(self):
+        """Return the introspection reader (:class:`BaseReader`) for this dialect."""
         ...
 
     # -- Execution (delegated to reader/connection) --------------------------

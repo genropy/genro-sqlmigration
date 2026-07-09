@@ -2,19 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-readers - Moduli di introspezione database
-==========================================
+readers - Database introspection modules
+=========================================
 
-I reader leggono la struttura **effettiva** di un database e producono
-il JSON normalizzato definito in :mod:`structures`.
+Readers read the **actual** structure of a database and produce the
+normalized JSON defined in :mod:`structures`.
 
-Ogni reader è specifico per un database engine:
+Each reader is specific to a database engine:
 
-- :class:`PgReader`: PostgreSQL (usa information_schema e pg_catalog)
-- SQLite reader: (futuro)
+- :class:`PgReader`: PostgreSQL (uses information_schema and pg_catalog)
+- SQLite reader: (future)
 
-Tutti i reader ereditano da :class:`BaseReader` e implementano
-il metodo :meth:`get_json_struct`.
+All readers inherit from :class:`BaseReader`, which declares the shared
+introspection flow driven by :meth:`get_json_struct`.
 """
 
 from genro_sqlmigration.readers.base_reader import BaseReader

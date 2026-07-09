@@ -2,561 +2,441 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-pg_reader.py - Reader di introspezione per PostgreSQL
-======================================================
+pg_reader.py - PostgreSQL introspection reader
+===============================================
 
-Legge la struttura effettiva di un database PostgreSQL usando
-``information_schema`` e ``pg_catalog``, e produce il JSON normalizzato.
+Reads the actual structure of a PostgreSQL database via
+``information_schema`` and ``pg_catalog``. The queries are ported from the
+legacy adapter and return the normalized row format consumed by the
+``process_*`` methods on :class:`BaseReader`.
 
-Questo reader sostituisce i metodi ``struct_get_*`` che erano negli
-adapter di Genropy, con un'implementazione dedicata e indipendente.
-
-Query eseguite
---------------
-
-1. **Schema info**: colonne con tipi, nullable, default
-   (da ``information_schema.columns``)
-2. **Constraints**: PK, UNIQUE, FK, CHECK
-   (da ``information_schema.table_constraints`` + ``key_column_usage``
-   + ``referential_constraints``)
-3. **Indexes**: tutti gli indici con metodo, opzioni, ordinamento
-   (da ``pg_class``, ``pg_index``, ``pg_am``, ``pg_attribute``)
-4. **Extensions**: estensioni installate
-   (da ``pg_extension``)
-5. **Event triggers**: trigger DDL
-   (da ``pg_event_trigger``)
-
-Mappatura tipi PostgreSQL -> dtype
------------------------------------
-
-::
-
-    bigint, int8         -> L
-    integer, int4        -> I
-    smallint, int2       -> R
-    numeric, decimal     -> N
-    boolean              -> B
-    date                 -> D
-    timestamp*           -> DH
-    time*                -> H
-    bytea                -> O
-    character varying    -> A (con size) o T (senza)
-    character, char      -> C
-    text                 -> T
-    ARRAY                -> T
-    json, jsonb          -> T
-    uuid                 -> T
-    (altro)              -> T
+Error contract (#655): a missing database raises
+:class:`NonExistingDbException`; any other connection failure raises
+:class:`SqlConnectionException`. Nothing is swallowed — introspection
+errors surface to the caller.
 """
 
 from collections import defaultdict
 
-from genro_sqlmigration.readers.base_reader import BaseReader
-from genro_sqlmigration.structures import (
-    new_column_item,
-    new_constraint_item,
-    new_event_trigger_item,
-    new_extension_item,
-    new_index_item,
-    new_relation_item,
-    new_schema_item,
-    new_structure_root,
-    new_table_item,
+from genro_sqlmigration.exceptions import (
+    NonExistingDbException,
+    SqlConnectionException,
 )
-
-# Mappatura tipi PostgreSQL -> dtype normalizzati
-PG_TYPES_MAP = {
-    'bigint': 'L', 'int8': 'L',
-    'integer': 'I', 'int4': 'I',
-    'smallint': 'R', 'int2': 'R',
-    'numeric': 'N', 'decimal': 'N',
-    'real': 'N', 'double precision': 'N',
-    'boolean': 'B',
-    'date': 'D',
-    'timestamp without time zone': 'DH',
-    'timestamp with time zone': 'DH',
-    'time without time zone': 'H',
-    'time with time zone': 'H',
-    'bytea': 'O',
-    'character varying': 'A',
-    'character': 'C', 'char': 'C',
-    'text': 'T',
-    'ARRAY': 'T',
-    'json': 'T', 'jsonb': 'T',
-    'uuid': 'T',
-    'xml': 'T',
-    'inet': 'T', 'cidr': 'T', 'macaddr': 'T',
-    'money': 'N',
-    'interval': 'T',
-    'point': 'T', 'line': 'T', 'lseg': 'T',
-    'box': 'T', 'path': 'T', 'polygon': 'T', 'circle': 'T',
-    'tsvector': 'T', 'tsquery': 'T',
-    'bit': 'T', 'bit varying': 'T',
-}
+from genro_sqlmigration.readers.base_reader import BaseReader
 
 DEFAULT_INDEX_METHOD = 'btree'
 
+PG_TYPES_DICT = {
+    'bigint': 'L',
+    'boolean': 'B',
+    'bytea': 'O',
+    'character varying': 'A',
+    'character': 'C',
+    'date': 'D',
+    'double precision': 'R',
+    'integer': 'I',
+    'jsonb': 'jsonb',
+    'money': 'M',
+    'numeric': 'N',
+    'real': 'R',
+    'smallint': 'I',
+    'text': 'T',
+    'time with time zone': 'HZ',
+    'time without time zone': 'H',
+    'timestamp with time zone': 'DHZ',
+    'timestamp without time zone': 'DH',
+    'tsvector': 'TSV',
+    'vector': 'VEC',
+}
+
+SCHEMA_INFO_SQL = """
+    SELECT
+        s.schema_name,
+        t.table_name,
+        c.column_name,
+        CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS data_type,
+        c.character_maximum_length,
+        c.is_nullable,
+        c.column_default,
+        c.numeric_precision,
+        c.numeric_scale,
+        CASE WHEN c.table_name IS NOT NULL THEN col_description(
+            format('%%I.%%I', c.table_schema, c.table_name)::regclass,
+            c.ordinal_position
+        ) END AS comment,
+        CASE WHEN t.table_name IS NOT NULL THEN obj_description(
+            format('%%I.%%I', t.table_schema, t.table_name)::regclass,
+            'pg_class'
+        ) END AS table_comment
+    FROM information_schema.schemata s
+    LEFT JOIN information_schema.tables t
+        ON s.schema_name = t.table_schema
+    LEFT JOIN information_schema.columns c
+        ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+    WHERE s.schema_name = ANY(%s)
+    ORDER BY s.schema_name, t.table_name, c.ordinal_position;
+"""
+
+PRIMARY_KEY_SQL = """
+    SELECT
+        tc.constraint_schema AS schema_name,
+        tc.table_name AS table_name,
+        tc.constraint_name AS constraint_name,
+        kcu.column_name AS column_name,
+        kcu.ordinal_position AS ordinal_position
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.constraint_schema = kcu.constraint_schema
+        AND tc.table_name = kcu.table_name
+    WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.constraint_schema = ANY(%s)
+    ORDER BY kcu.ordinal_position;
+"""
+
+UNIQUE_CONSTRAINT_SQL = """
+    SELECT
+        tc.constraint_schema AS schema_name,
+        tc.table_name AS table_name,
+        tc.constraint_name AS constraint_name,
+        kcu.column_name AS column_name,
+        kcu.ordinal_position AS ordinal_position
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.constraint_schema = kcu.constraint_schema
+        AND tc.table_name = kcu.table_name
+    WHERE tc.constraint_type = 'UNIQUE'
+        AND tc.constraint_schema = ANY(%s)
+    ORDER BY tc.constraint_name, kcu.ordinal_position;
+"""
+
+FOREIGN_KEY_SQL = """
+    SELECT DISTINCT
+        nsp1.nspname AS schema_name,
+        cls1.relname AS table_name,
+        con.conname AS constraint_name,
+        att1.attname AS column_name,
+        fk.ord AS ord,
+        CASE con.confupdtype
+            WHEN 'a' THEN 'NO ACTION'
+            WHEN 'r' THEN 'RESTRICT'
+            WHEN 'c' THEN 'CASCADE'
+            WHEN 'n' THEN 'SET NULL'
+            WHEN 'd' THEN 'SET DEFAULT'
+        END AS on_update,
+        CASE con.confdeltype
+            WHEN 'a' THEN 'NO ACTION'
+            WHEN 'r' THEN 'RESTRICT'
+            WHEN 'c' THEN 'CASCADE'
+            WHEN 'n' THEN 'SET NULL'
+            WHEN 'd' THEN 'SET DEFAULT'
+        END AS on_delete,
+        nsp2.nspname AS related_schema,
+        cls2.relname AS related_table,
+        att2.attname AS related_column,
+        CASE con.condeferrable WHEN TRUE THEN 'YES' ELSE 'NO' END AS deferrable,
+        CASE con.condeferred WHEN TRUE THEN 'YES' ELSE 'NO' END AS initially_deferred
+    FROM pg_constraint con
+    JOIN pg_class cls1 ON cls1.oid = con.conrelid
+    JOIN pg_namespace nsp1 ON nsp1.oid = cls1.relnamespace
+    JOIN LATERAL UNNEST(con.conkey) WITH ORDINALITY AS fk(colnum, ord) ON TRUE
+    JOIN pg_attribute att1 ON att1.attnum = fk.colnum AND att1.attrelid = con.conrelid
+    JOIN pg_class cls2 ON cls2.oid = con.confrelid
+    JOIN pg_namespace nsp2 ON nsp2.oid = cls2.relnamespace
+    JOIN LATERAL UNNEST(con.confkey) WITH ORDINALITY AS ref(colnum, ord) ON fk.ord = ref.ord
+    JOIN pg_attribute att2 ON att2.attnum = ref.colnum AND att2.attrelid = con.confrelid
+    WHERE con.contype = 'f'
+        AND nsp1.nspname = ANY(%s)
+    ORDER BY con.conname, ord;
+"""
+
+CHECK_CONSTRAINT_SQL = """
+    SELECT
+        nsp.nspname AS schema_name,
+        cls.relname AS table_name,
+        con.conname AS constraint_name,
+        pg_get_expr(con.conbin, con.conrelid) AS check_clause
+    FROM pg_constraint con
+    JOIN pg_class cls ON cls.oid = con.conrelid
+    JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+    WHERE con.contype = 'c'
+        AND nsp.nspname = ANY(%s)
+    ORDER BY con.conname;
+"""
+
+INDEXES_SQL = """
+    SELECT
+        n.nspname AS schema_name,
+        t.relname AS table_name,
+        i.relname AS index_name,
+        a.attname AS column_name,
+        ix.indisunique AS is_unique,
+        ix.indoption[array_position(ix.indkey, a.attnum)-1] & 1 AS desc_order,
+        am.amname AS index_method,
+        spc.spcname AS tablespace,
+        pg_get_expr(ix.indpred, t.oid) AS where_clause,
+        i.reloptions AS with_options,
+        array_position(ix.indkey, a.attnum) AS ordinal_position,
+        con.contype AS constraint_type
+    FROM pg_class t
+    JOIN pg_index ix ON t.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_am am ON i.relam = am.oid
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+    JOIN pg_namespace n ON t.relnamespace = n.oid
+    LEFT JOIN pg_tablespace spc ON i.reltablespace = spc.oid
+    LEFT JOIN pg_constraint con ON con.conindid = i.oid
+    WHERE t.relkind = 'r'
+        AND n.nspname = ANY(%s)
+    ORDER BY n.nspname, t.relname, i.relname, ordinal_position;
+"""
+
+EXTENSIONS_SQL = """
+    SELECT
+        e.extname AS extension_name,
+        e.extversion AS version,
+        e.extrelocatable AS relocatable,
+        e.extconfig AS config_tables,
+        e.extcondition AS conditions,
+        n.nspname AS schema_name
+    FROM pg_extension e
+    JOIN pg_namespace n ON e.extnamespace = n.oid
+    ORDER BY e.extname;
+"""
+
+EVENT_TRIGGERS_SQL = """
+    SELECT
+        evtname AS trigger_name,
+        evtevent AS event,
+        evtowner::regrole AS owner,
+        obj_description(oid, 'pg_event_trigger') AS description,
+        evtfoid::regprocedure AS function_name,
+        evtenabled AS enabled_state,
+        evttags AS event_tags
+    FROM pg_event_trigger
+    ORDER BY trigger_name;
+"""
+
 
 class PgReader(BaseReader):
-    """Reader di introspezione per database PostgreSQL.
+    """PostgreSQL introspection reader.
 
-    Legge la struttura effettiva del database usando query su
-    ``information_schema`` e ``pg_catalog``.
+    Implements the per-dialect hooks of :class:`BaseReader` with queries
+    ported from the legacy adapter.
 
     Args:
-        connection_params: Dizionario con i parametri di connessione psycopg.
-            Es: ``{"dbname": "mydb", "user": "postgres", "host": "localhost"}``.
-            Oppure una stringa DSN: ``"postgresql://user:pass@host/dbname"``.
+        connection_params: a psycopg kwargs dict
+            (``{"dbname": "mydb", "user": "postgres", "host": "localhost"}``)
+            or a DSN string (``"postgresql://user:pass@host/dbname"``).
     """
 
     def __init__(self, connection_params=None):
         super().__init__(connection_params)
         self._conn = None
 
-    def _connect(self):
-        """Apre una connessione al database PostgreSQL."""
-        import psycopg
-        if isinstance(self.connection_params, str):
-            self._conn = psycopg.connect(self.connection_params)
-        else:
-            self._conn = psycopg.connect(**self.connection_params)
+    def dbname(self):
+        """Return the database name (used for exception messages)."""
+        if isinstance(self.connection_params, dict):
+            return self.connection_params.get('dbname')
+        return self.connection_params
 
-    def _close(self):
-        """Chiude la connessione al database."""
+    def connect(self):
+        """Open a psycopg connection with the #655 error taxonomy.
+
+        A missing database raises :class:`NonExistingDbException`; any
+        other connection failure raises :class:`SqlConnectionException`.
+        """
+        import psycopg  # optional dependency (postgresql extra)
+        try:
+            if isinstance(self.connection_params, str):
+                self._conn = psycopg.connect(self.connection_params)
+            else:
+                self._conn = psycopg.connect(**self.connection_params)
+        except psycopg.OperationalError as error:
+            if 'does not exist' in str(error).lower():
+                raise NonExistingDbException(self.dbname()) from error
+            raise SqlConnectionException(
+                self.dbname(), original_error=error
+            ) from error
+
+    def close(self):
+        """Close the database connection if open."""
         if self._conn:
             self._conn.close()
             self._conn = None
 
     def _fetch(self, sql, params=None):
-        """Esegue una query e restituisce le righe come tuple.
-
-        Args:
-            sql: Query SQL da eseguire.
-            params: Parametri della query (opzionali).
-
-        Returns:
-            list: Lista di tuple con i risultati.
-        """
+        """Execute a query and return the rows as tuples."""
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
 
-    def get_json_struct(self, dbname, schemas=None):
-        """Legge la struttura del database PostgreSQL.
+    def fetch_base_structure(self, schemas):
+        columns = []
+        for row in self._fetch(SCHEMA_INFO_SQL, (list(schemas),)):
+            (schema_name, table_name, column_name, data_type,
+             char_max_length, is_nullable, column_default,
+             numeric_precision, numeric_scale,
+             comment, table_comment) = row
+            col = {
+                '_pg_schema_name': schema_name,
+                '_pg_table_name': table_name,
+                'name': column_name,
+                'dtype': data_type,
+                'length': char_max_length,
+                '_pg_is_nullable': is_nullable,
+                'sqldefault': column_default,
+                '_pg_numeric_precision': numeric_precision,
+                '_pg_numeric_scale': numeric_scale,
+                'comment': comment,
+                '_pg_table_comment': table_comment,
+            }
+            if col['sqldefault'] and col['sqldefault'].startswith('nextval('):
+                col['_pg_default'] = col.pop('sqldefault')
+            dtype = col['dtype'] = PG_TYPES_DICT.get(col['dtype'], 'T')
+            if dtype == 'N':
+                precision = col.pop('_pg_numeric_precision', None)
+                scale = col.pop('_pg_numeric_scale', None)
+                if precision is not None and scale is not None:
+                    col['size'] = f"{precision},{scale}"
+                elif precision is not None:
+                    col['size'] = f"{precision}"
+            elif dtype == 'A':
+                size = col.pop('length', None)
+                if size:
+                    col['size'] = f"0:{size}"
+                else:
+                    dtype = col['dtype'] = 'T'
+            elif dtype == 'C':
+                size = col.pop('length', None)
+                if size is not None:
+                    col['size'] = str(size)
+            if dtype == 'L' and col.get('_pg_default'):
+                col['dtype'] = 'serial'
+            columns.append(col)
+        return columns
 
-        Apre una connessione, esegue le query di introspezione e chiude
-        la connessione nel blocco ``finally``.
+    def fetch_constraints(self, schemas):
+        constraints = defaultdict(lambda: defaultdict(dict))
+        for row in self._fetch(PRIMARY_KEY_SQL, (list(schemas),)):
+            schema_name, table_name, constraint_name, column_name, _ = row
+            table_key = (schema_name, table_name)
+            if "PRIMARY KEY" not in constraints[table_key]:
+                constraints[table_key]["PRIMARY KEY"] = {
+                    "constraint_name": constraint_name,
+                    "constraint_type": "PRIMARY KEY",
+                    "columns": [],
+                }
+            constraints[table_key]["PRIMARY KEY"]["columns"].append(column_name)
 
-        Args:
-            dbname: Nome del database.
-            schemas: Lista degli schemi da ispezionare.
+        for row in self._fetch(UNIQUE_CONSTRAINT_SQL, (list(schemas),)):
+            schema_name, table_name, constraint_name, column_name, _ = row
+            table_key = (schema_name, table_name)
+            if constraint_name not in constraints[table_key]["UNIQUE"]:
+                constraints[table_key]["UNIQUE"][constraint_name] = {
+                    "constraint_name": constraint_name,
+                    "constraint_type": "UNIQUE",
+                    "columns": [],
+                }
+            constraints[table_key]["UNIQUE"][constraint_name]["columns"].append(column_name)
 
-        Returns:
-            dict: Struttura JSON normalizzata, o ``{}`` se il DB non esiste.
-        """
-        if not schemas:
-            return {}
+        for row in self._fetch(FOREIGN_KEY_SQL, (list(schemas),)):
+            (schema_name, table_name, constraint_name, column_name, _ord,
+             on_update, on_delete, related_schema, related_table,
+             related_column, deferrable, initially_deferred) = row
+            table_key = (schema_name, table_name)
+            if constraint_name not in constraints[table_key]["FOREIGN KEY"]:
+                constraints[table_key]["FOREIGN KEY"][constraint_name] = {
+                    "constraint_name": constraint_name,
+                    "constraint_type": "FOREIGN KEY",
+                    "columns": [],
+                    "on_update": on_update,
+                    "on_delete": on_delete,
+                    "related_schema": related_schema,
+                    "related_table": related_table,
+                    "deferrable": deferrable == "YES",
+                    "initially_deferred": initially_deferred == "YES",
+                    "related_columns": [],
+                }
+            fk = constraints[table_key]["FOREIGN KEY"][constraint_name]
+            fk["columns"].append(column_name)
+            fk["related_columns"].append(related_column)
 
-        json_structure = new_structure_root(dbname)
-        json_schemas = json_structure['root']['schemas']
+        for row in self._fetch(CHECK_CONSTRAINT_SQL, (list(schemas),)):
+            schema_name, table_name, constraint_name, check_clause = row
+            table_key = (schema_name, table_name)
+            constraints[table_key]["CHECK"][constraint_name] = {
+                "constraint_name": constraint_name,
+                "constraint_type": "CHECK",
+                "check_clause": check_clause,
+            }
+        return constraints
 
-        try:
-            self._connect()
+    def fetch_indexes(self, schemas):
+        indexes = defaultdict(dict)
+        for row in self._fetch(INDEXES_SQL, (list(schemas),)):
+            (schema_name, table_name, index_name, column_name, is_unique,
+             desc_order, index_method, tablespace, where_clause,
+             with_options, _ordinal_position, constraint_type) = row
+            table_key = (schema_name, table_name)
+            if index_name not in indexes[table_key]:
+                indexes[table_key][index_name] = {
+                    "unique": is_unique,
+                    "method": index_method if index_method != DEFAULT_INDEX_METHOD else None,
+                    "tablespace": tablespace,
+                    "where": where_clause,
+                    "with_options": {},
+                    "columns": {},
+                    "constraint_type": constraint_type,
+                }
+            sort_order = "DESC" if desc_order else None
+            indexes[table_key][index_name]["columns"][column_name] = sort_order
+            if with_options:
+                for option in with_options:
+                    key, value = option.split('=')
+                    indexes[table_key][index_name]["with_options"][key.strip()] = value.strip()
+        return indexes
 
-            # 1. Schema info: colonne con tipi
-            self._process_base_structure(json_schemas, schemas)
+    def fetch_extensions(self):
+        extensions = {}
+        for row in self._fetch(EXTENSIONS_SQL, ()):
+            (extension_name, version, relocatable,
+             config_tables, conditions, schema_name) = row
+            extensions[extension_name] = {
+                "version": version,
+                "relocatable": relocatable,
+                "config_tables": config_tables or [],
+                "conditions": conditions or [],
+                "schema_name": schema_name,
+            }
+        return extensions
 
-            # 2. Constraints: PK, UNIQUE, FK
-            self._process_constraints(json_schemas, schemas)
-
-            # 3. Indexes
-            self._process_indexes(json_schemas, schemas)
-
-            # 4. Extensions
-            self._process_extensions(json_structure, schemas)
-
-            # 5. Event triggers
-            self._process_event_triggers(json_structure)
-
-        except Exception:
-            return {}
-        finally:
-            self._close()
-
-        return json_structure
+    def fetch_event_triggers(self):
+        event_triggers = {}
+        for row in self._fetch(EVENT_TRIGGERS_SQL, ()):
+            (trigger_name, event, owner, description,
+             function_name, enabled_state, event_tags) = row
+            event_triggers[trigger_name] = {
+                "event": event,
+                "owner": owner,
+                "description": description,
+                "function_name": function_name,
+                "enabled_state": enabled_state,
+                "event_tags": event_tags or [],
+            }
+        return event_triggers
 
     def is_empty_column(self, schema_name, table_name, column_name):
-        """Verifica se una colonna contiene solo NULL.
-
-        Args:
-            schema_name: Nome dello schema.
-            table_name: Nome della tabella.
-            column_name: Nome della colonna.
-
-        Returns:
-            bool: True se la colonna non contiene valori non-NULL.
-        """
+        """Return True if the column contains only NULL values."""
         sql = f'''
             SELECT COUNT(*) = 0 AS is_empty
             FROM "{schema_name}"."{table_name}"
             WHERE "{column_name}" IS NOT NULL
         '''
         try:
-            self._connect()
+            self.connect()
             rows = self._fetch(sql)
             return rows[0][0] if rows else False
         finally:
-            self._close()
-
-    # -------------------------------------------------------------------
-    # Processing interno
-    # -------------------------------------------------------------------
-
-    def _process_base_structure(self, json_schemas, schemas):
-        """Legge colonne e tipi da information_schema.
-
-        Args:
-            json_schemas: Dizionario schemi da popolare.
-            schemas: Lista schemi da ispezionare.
-        """
-        sql = """
-            SELECT
-                c.table_schema,
-                c.table_name,
-                c.column_name,
-                c.data_type,
-                c.character_maximum_length,
-                c.is_nullable,
-                c.column_default,
-                c.numeric_precision,
-                c.numeric_scale
-            FROM information_schema.columns c
-            JOIN information_schema.tables t
-                ON c.table_schema = t.table_schema
-                AND c.table_name = t.table_name
-            WHERE t.table_type = 'BASE TABLE'
-                AND c.table_schema = ANY(%s)
-            ORDER BY c.table_schema, c.table_name, c.ordinal_position
-        """
-        # Pre-inizializza gli schemi
-        for schema_name in schemas:
-            json_schemas[schema_name] = None
-
-        for row in self._fetch(sql, (schemas,)):
-            (schema_name, table_name, column_name, data_type,
-             char_max_length, is_nullable, column_default,
-             numeric_precision, numeric_scale) = row
-
-            if not json_schemas[schema_name]:
-                json_schemas[schema_name] = new_schema_item(schema_name)
-            if table_name not in json_schemas[schema_name]['tables']:
-                json_schemas[schema_name]['tables'][table_name] = (
-                    new_table_item(schema_name, table_name)
-                )
-
-            # Converti tipo PostgreSQL -> dtype normalizzato
-            dtype = PG_TYPES_MAP.get(data_type, 'T')
-            colattr = {'dtype': dtype}
-
-            # Gestione size per tipi specifici
-            if dtype == 'N' and numeric_precision is not None:
-                if numeric_scale is not None:
-                    colattr['size'] = f"{numeric_precision},{numeric_scale}"
-                else:
-                    colattr['size'] = f"{numeric_precision}"
-            elif dtype == 'A' and char_max_length:
-                colattr['size'] = f"0:{char_max_length}"
-            elif dtype == 'C' and char_max_length:
-                colattr['size'] = str(char_max_length)
-            elif dtype == 'A' and not char_max_length:
-                dtype = colattr['dtype'] = 'T'
-
-            # NOT NULL
-            if is_nullable == 'NO':
-                colattr['notnull'] = True
-
-            # Default (escludi nextval per serial)
-            if column_default and not column_default.startswith('nextval('):
-                colattr['sqldefault'] = column_default
-
-            # Serial detection
-            if dtype == 'L' and column_default and column_default.startswith('nextval('):
-                colattr['dtype'] = 'serial'
-
-            col_item = new_column_item(
-                schema_name, table_name, column_name, attributes=colattr
-            )
-            json_schemas[schema_name]['tables'][table_name]['columns'][column_name] = col_item
-
-        # Rimuovi schemi vuoti
-        for schema_name in schemas:
-            if not json_schemas[schema_name]:
-                json_schemas.pop(schema_name)
-
-    def _process_constraints(self, json_schemas, schemas):
-        """Legge PK, UNIQUE e FK da information_schema.
-
-        Args:
-            json_schemas: Dizionario schemi da popolare.
-            schemas: Lista schemi da ispezionare.
-        """
-        # PRIMARY KEY
-        pk_sql = """
-            SELECT tc.table_schema, tc.table_name,
-                   tc.constraint_name, kcu.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-                ON tc.constraint_name = kcu.constraint_name
-                AND tc.table_schema = kcu.table_schema
-            WHERE tc.constraint_type = 'PRIMARY KEY'
-                AND tc.table_schema = ANY(%s)
-            ORDER BY tc.table_schema, tc.table_name,
-                     kcu.ordinal_position
-        """
-        pk_data = defaultdict(list)
-        for row in self._fetch(pk_sql, (schemas,)):
-            schema_name, table_name, _, column_name = row
-            pk_data[(schema_name, table_name)].append(column_name)
-
-        for (schema_name, table_name), columns in pk_data.items():
-            if schema_name not in json_schemas:
-                continue
-            table_json = json_schemas[schema_name]['tables'].get(table_name)
-            if not table_json:
-                continue
-            table_json['attributes']['pkeys'] = ','.join(columns)
-            for col in columns:
-                if col in table_json['columns']:
-                    table_json['columns'][col]['attributes']['notnull'] = '_auto_'
-
-        # UNIQUE constraints
-        uq_sql = """
-            SELECT tc.table_schema, tc.table_name,
-                   tc.constraint_name, kcu.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-                ON tc.constraint_name = kcu.constraint_name
-                AND tc.table_schema = kcu.table_schema
-            WHERE tc.constraint_type = 'UNIQUE'
-                AND tc.table_schema = ANY(%s)
-            ORDER BY tc.table_schema, tc.table_name,
-                     tc.constraint_name, kcu.ordinal_position
-        """
-        uq_data = defaultdict(lambda: defaultdict(list))
-        for row in self._fetch(uq_sql, (schemas,)):
-            schema_name, table_name, constraint_name, column_name = row
-            uq_data[(schema_name, table_name)][constraint_name].append(column_name)
-
-        for (schema_name, table_name), constraints in uq_data.items():
-            if schema_name not in json_schemas:
-                continue
-            table_json = json_schemas[schema_name]['tables'].get(table_name)
-            if not table_json:
-                continue
-            for constraint_name, columns in constraints.items():
-                if len(columns) == 1:
-                    col = columns[0]
-                    if col == table_json['attributes']['pkeys']:
-                        continue
-                    table_json['columns'][col]['attributes']['unique'] = True
-                else:
-                    const_item = new_constraint_item(
-                        schema_name, table_name, columns,
-                        constraint_type='UNIQUE',
-                        constraint_name=constraint_name
-                    )
-                    table_json['constraints'][const_item['entity_name']] = const_item
-
-        # FOREIGN KEY constraints
-        fk_sql = """
-            SELECT
-                tc.table_schema, tc.table_name,
-                tc.constraint_name,
-                kcu.column_name,
-                ccu.table_schema AS related_schema,
-                ccu.table_name AS related_table,
-                ccu.column_name AS related_column,
-                rc.update_rule, rc.delete_rule,
-                tc.is_deferrable, tc.initially_deferred
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-                ON tc.constraint_name = kcu.constraint_name
-                AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage ccu
-                ON tc.constraint_name = ccu.constraint_name
-                AND tc.table_schema = ccu.table_schema
-            JOIN information_schema.referential_constraints rc
-                ON tc.constraint_name = rc.constraint_name
-                AND tc.table_schema = rc.constraint_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-                AND tc.table_schema = ANY(%s)
-            ORDER BY tc.table_schema, tc.table_name,
-                     tc.constraint_name, kcu.ordinal_position
-        """
-        fk_data = defaultdict(lambda: defaultdict(lambda: {
-            'columns': [], 'related_columns': [],
-            'related_schema': None, 'related_table': None,
-            'on_update': None, 'on_delete': None,
-            'deferrable': False, 'initially_deferred': False,
-            'constraint_name': None
-        }))
-        for row in self._fetch(fk_sql, (schemas,)):
-            (schema_name, table_name, constraint_name, column_name,
-             related_schema, related_table, related_column,
-             update_rule, delete_rule, is_deferrable, initially_deferred) = row
-
-            key = (schema_name, table_name)
-            fk = fk_data[key][constraint_name]
-            if column_name not in fk['columns']:
-                fk['columns'].append(column_name)
-            if related_column not in fk['related_columns']:
-                fk['related_columns'].append(related_column)
-            fk['related_schema'] = related_schema
-            fk['related_table'] = related_table
-            fk['on_update'] = update_rule
-            fk['on_delete'] = delete_rule
-            fk['deferrable'] = is_deferrable == 'YES'
-            fk['initially_deferred'] = initially_deferred == 'YES'
-            fk['constraint_name'] = constraint_name
-
-        for (schema_name, table_name), fk_constraints in fk_data.items():
-            if schema_name not in json_schemas:
-                continue
-            table_json = json_schemas[schema_name]['tables'].get(table_name)
-            if not table_json:
-                continue
-            for fk_attrs in fk_constraints.values():
-                cn = fk_attrs.pop('constraint_name')
-                relation_item = new_relation_item(
-                    schema_name, table_name,
-                    columns=fk_attrs['columns'],
-                    attributes=fk_attrs,
-                    constraint_name=cn
-                )
-                table_json['relations'][relation_item['entity_name']] = relation_item
-
-    def _process_indexes(self, json_schemas, schemas):
-        """Legge gli indici da pg_catalog.
-
-        Filtra gli indici creati automaticamente da constraint (PK, UNIQUE).
-
-        Args:
-            json_schemas: Dizionario schemi da popolare.
-            schemas: Lista schemi da ispezionare.
-        """
-        sql = """
-            SELECT
-                n.nspname AS schema_name,
-                t.relname AS table_name,
-                i.relname AS index_name,
-                a.attname AS column_name,
-                ix.indisunique AS is_unique,
-                ix.indoption[array_position(ix.indkey, a.attnum)-1] & 1 AS desc_order,
-                am.amname AS index_method,
-                spc.spcname AS tablespace,
-                pg_get_expr(ix.indpred, t.oid) AS where_clause,
-                i.reloptions AS with_options,
-                array_position(ix.indkey, a.attnum) AS ordinal_position,
-                con.contype AS constraint_type
-            FROM pg_class t
-            JOIN pg_index ix ON t.oid = ix.indrelid
-            JOIN pg_class i ON i.oid = ix.indexrelid
-            JOIN pg_am am ON i.relam = am.oid
-            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
-            JOIN pg_namespace n ON t.relnamespace = n.oid
-            LEFT JOIN pg_tablespace spc ON i.reltablespace = spc.oid
-            LEFT JOIN pg_constraint con ON con.conindid = i.oid
-            WHERE t.relkind = 'r'
-                AND n.nspname = ANY(%s)
-            ORDER BY n.nspname, t.relname, i.relname, ordinal_position
-        """
-        indexes = defaultdict(lambda: defaultdict(dict))
-        for row in self._fetch(sql, (schemas,)):
-            (schema_name, table_name, index_name, column_name, is_unique,
-             desc_order, index_method, tablespace, where_clause,
-             with_options, _, constraint_type) = row
-
-            table_key = (schema_name, table_name)
-            if index_name not in indexes[table_key]:
-                indexes[table_key][index_name] = {
-                    'unique': is_unique,
-                    'method': index_method if index_method != DEFAULT_INDEX_METHOD else None,
-                    'tablespace': tablespace,
-                    'where': where_clause,
-                    'with_options': {},
-                    'columns': {},
-                    'constraint_type': constraint_type
-                }
-            sort_order = "DESC" if desc_order else None
-            indexes[table_key][index_name]['columns'][column_name] = sort_order
-
-            if with_options:
-                for option in with_options:
-                    k, v = option.split('=')
-                    indexes[table_key][index_name]['with_options'][k.strip()] = v.strip()
-
-        for (schema_name, table_name), idx_dict in indexes.items():
-            if schema_name not in json_schemas:
-                continue
-            table_json = json_schemas[schema_name]['tables'].get(table_name)
-            if not table_json:
-                continue
-            for index_name, index_attributes in idx_dict.items():
-                if index_attributes.get('constraint_type'):
-                    continue
-                indexed_columns = list(index_attributes['columns'].keys())
-                index_item = new_index_item(
-                    schema_name, table_name,
-                    columns=indexed_columns,
-                    attributes=index_attributes,
-                    index_name=index_name
-                )
-                table_json['indexes'][index_item['entity_name']] = index_item
-
-    def _process_extensions(self, json_structure, schemas):
-        """Legge le estensioni PostgreSQL installate.
-
-        Filtra le estensioni dello schema ``pg_catalog``.
-
-        Args:
-            json_structure: Struttura JSON root da popolare.
-            schemas: Lista schemi (non usata direttamente).
-        """
-        sql = """
-            SELECT e.extname, e.extversion, e.extrelocatable,
-                   n.nspname AS schema_name
-            FROM pg_extension e
-            JOIN pg_namespace n ON e.extnamespace = n.oid
-            ORDER BY e.extname
-        """
-        for row in self._fetch(sql):
-            extension_name, version, relocatable, schema_name = row
-            if schema_name == 'pg_catalog':
-                continue
-            extension_item = new_extension_item(extension_name)
-            json_structure['root']['extensions'][extension_name] = extension_item
-
-    def _process_event_triggers(self, json_structure):
-        """Legge gli event trigger DDL.
-
-        Args:
-            json_structure: Struttura JSON root da popolare.
-        """
-        sql = """
-            SELECT evtname, evtevent, evtowner::regrole,
-                   evtfoid::regprocedure, evtenabled, evttags
-            FROM pg_event_trigger
-            ORDER BY evtname
-        """
-        for row in self._fetch(sql):
-            (trigger_name, event, owner,
-             function_name, enabled_state, event_tags) = row
-            trigger_item = new_event_trigger_item(trigger_name)
-            trigger_item['attributes'].update({
-                'event': event,
-                'owner': str(owner),
-                'function_name': str(function_name),
-                'enabled_state': enabled_state,
-                'event_tags': event_tags or []
-            })
-            json_structure['root']['event_triggers'][trigger_name] = trigger_item
+            self.close()

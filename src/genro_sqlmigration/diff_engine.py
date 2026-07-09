@@ -50,7 +50,7 @@ class DiffMixin:
 
     This mixin is composed into the :class:`SqlMigrator` class and
     requires the host to have these attributes:
-    - ``sqlStructure``: JSON structure of the database (from DbExtractor)
+    - ``sqlStructure``: JSON structure of the database (from the reader)
     - ``ormStructure``: JSON structure of the ORM (from OrmExtractor)
     """
 
