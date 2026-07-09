@@ -94,6 +94,35 @@ the M1 fixtures:
    included so schema v1.0 ships complete for all existing entity
    kinds.
 
+## 5. Outcome (2026-07-09) — M2 landed
+
+All §4 deliverables shipped, plus wave 0:
+
+1. **JSON Schema**: `src/genro_sqlmigration/schemas/structure-1.0.json`
+   (draft 2020-12, named `$defs` per entity, closed enums for entity
+   markers, dtype codes and FK actions, `additionalProperties: false`
+   on attributes, `format_version` const). Packaged in the wheel.
+2. **`StructureValidator`** (`validation.py`, exported from the package
+   root): container normalization (the version-compatibility story),
+   optional formal pass via `jsonschema` (new `validation` extra),
+   semantic pass (pkey/constraint/index/FK columns exist, FK targets
+   resolve, structural hashed names consistent, dtype codes closed,
+   column attributes ⊆ `COL_JSON_KEYS`). Raises `SqlValidationError`
+   with the full error list; returns a normalized deep copy.
+3. **Producer guide**: `docs/producer_guide.md` (🔴), distilled from
+   the M1 reference producer (`tests/support/orm_producer.py`).
+4. **Versioning**: `FORMAT_VERSION = '1.0'` and `DTYPE_CODES` in
+   `structures.py`; the optional top-level `format_version` envelope
+   key is validated and stripped at the boundary (`extractOrm` also
+   strips it defensively — it is never diffed). Planned minor bumps:
+   doc `05` §1 waves.
+5. **Wave 0 shipped**: CHECK constraints (name-keyed items with
+   `check_clause`; extraction, ADD/DROP+ADD handlers, inline CREATE
+   TABLE rendering) and column/table comments (`comment` as 9th
+   `COL_JSON_KEYS` entry + table attribute, `COMMENT ON` idempotent
+   replaces emitted as per-table post-commands). Pinned by the new
+   oracle suite `tests/test_wave0_pg.py`.
+
 ---
 
 ## Riferimenti
@@ -101,3 +130,5 @@ the M1 fixtures:
 - Contract decisions: doc `01` §3 (2026-07-08).
 - Divergences vs legacy to encode: doc `02` §B/§D.
 - Legacy dtype tables: genro-sql doc `03` §5.
+- Producer guide: `docs/producer_guide.md`; schema:
+  `src/genro_sqlmigration/schemas/structure-1.0.json`.
