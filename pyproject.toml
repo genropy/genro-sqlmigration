@@ -54,6 +54,7 @@ dev = [
     "pytest-sugar>=1.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
+    "testing.postgresql>=1.3",
 ]
 docs = [
     "sphinx>=8.0.0",
