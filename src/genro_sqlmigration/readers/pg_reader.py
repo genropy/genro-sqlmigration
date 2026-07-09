@@ -53,10 +53,15 @@ from collections import defaultdict
 
 from genro_sqlmigration.readers.base_reader import BaseReader
 from genro_sqlmigration.structures import (
-    new_structure_root, new_schema_item, new_table_item,
-    new_column_item, new_constraint_item, new_relation_item,
-    new_index_item, new_extension_item, new_event_trigger_item,
-    nested_defaultdict, clean_attributes
+    new_column_item,
+    new_constraint_item,
+    new_event_trigger_item,
+    new_extension_item,
+    new_index_item,
+    new_relation_item,
+    new_schema_item,
+    new_structure_root,
+    new_table_item,
 )
 
 # Mappatura tipi PostgreSQL -> dtype normalizzati
@@ -420,7 +425,7 @@ class PgReader(BaseReader):
             table_json = json_schemas[schema_name]['tables'].get(table_name)
             if not table_json:
                 continue
-            for constraint_name, fk_attrs in fk_constraints.items():
+            for fk_attrs in fk_constraints.values():
                 cn = fk_attrs.pop('constraint_name')
                 relation_item = new_relation_item(
                     schema_name, table_name,

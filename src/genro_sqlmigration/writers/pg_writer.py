@@ -14,65 +14,135 @@ negli adapter di Genropy.
 Mappatura dtype -> tipo SQL PostgreSQL
 ---------------------------------------
 
-::
+La mappa ``REV_TYPES_DICT`` replica la ``revTypesDict`` dell'adapter
+PostgreSQL legacy (nomi lunghi: ``character varying``, non ``varchar``,
+perche' sono gli stessi che l'introspezione restituisce)::
 
-    T  -> text
-    C  -> char(size)
-    A  -> varchar(max_size)
-    I  -> integer
-    L  -> bigint
-    R  -> smallint
-    N  -> numeric(precision,scale)
-    B  -> boolean
-    D  -> date
+    T/X/Z/P -> text          A -> character varying(max)
+    C  -> character(size)    N -> numeric(precision,scale)
+    I  -> integer            L -> bigint          R -> real
+    B  -> boolean            D -> date            DT -> interval
     DH -> timestamp without time zone
+    DHZ -> timestamp with time zone
     H  -> time without time zone
-    O  -> bytea
-    serial -> bigserial
+    HZ -> time with time zone
+    M  -> money   O -> bytea   TSV -> tsvector   VEC -> vector
+    serial -> serial8
 """
 
 from genro_sqlmigration.writers.base_writer import BaseWriter
 
-# Mappatura dtype normalizzato -> tipo SQL PostgreSQL
-DTYPE_TO_SQL = {
-    'T': 'text',
-    'I': 'integer',
-    'L': 'bigint',
-    'R': 'smallint',
+# Mappatura dtype normalizzato -> tipo SQL PostgreSQL (legacy revTypesDict)
+REV_TYPES_DICT = {
+    'A': 'character varying',
     'B': 'boolean',
+    'C': 'character',
     'D': 'date',
     'DH': 'timestamp without time zone',
+    'DHZ': 'timestamp with time zone',
+    'DT': 'interval',
     'H': 'time without time zone',
+    'HZ': 'time with time zone',
+    'I': 'integer',
+    'L': 'bigint',
+    'M': 'money',
+    'N': 'numeric',
     'O': 'bytea',
-    'serial': 'bigserial',
+    'P': 'text',
+    'R': 'real',
+    'T': 'text',
+    'TSV': 'tsvector',
+    'VEC': 'vector',
+    'X': 'text',
+    'Z': 'text',
+    'jsonb': 'jsonb',
+    'serial': 'serial8',
 }
 
-# Conversioni di tipo supportate.
+# Conversioni semplici condivise (legacy base adapter TYPE_CONVERSIONS).
 # Chiave: (old_dtype, new_dtype)
-# Valore: None/True = conversione semplice, str = espressione USING
+# Valore: None/True = ALTER TYPE diretto, str = espressione USING
+BASE_TYPE_CONVERSIONS = {
+    # Simple text conversions (no USING needed)
+    ('A', 'T'): None,
+    ('A', 'C'): None,
+    ('A', 'X'): None,
+    ('A', 'Z'): None,
+    ('A', 'P'): None,
+    ('T', 'A'): None,
+    ('T', 'C'): None,
+    ('T', 'X'): None,
+    ('T', 'Z'): None,
+    ('T', 'P'): None,
+    ('C', 'A'): None,
+    ('C', 'T'): None,
+    ('C', 'X'): None,
+    ('C', 'Z'): None,
+    ('C', 'P'): None,
+
+    # Simple numeric conversions
+    ('I', 'L'): None,
+    ('I', 'N'): None,
+    ('B', 'I'): None,
+    ('N', 'I'): None,
+    ('N', 'L'): None,
+    ('N', 'R'): None,
+    ('L', 'I'): None,
+    ('L', 'N'): None,
+    ('L', 'R'): None,
+
+    # Simple date/time conversions
+    ('D', 'DH'): None,
+    ('D', 'DHZ'): None,
+    ('DH', 'D'): None,
+    ('DH', 'DHZ'): None,
+    ('DHZ', 'D'): None,
+    ('DHZ', 'DH'): None,
+}
+
+# Conversioni PostgreSQL con clausola USING (legacy PG adapter).
+# I valori non conformi al pattern diventano NULL.
 PG_TYPE_CONVERSIONS = {
-    ('T', 'I'): 'CASE WHEN {column_name} ~ \'^[0-9]+$\' '
-                'THEN {column_name}::integer ELSE NULL END',
-    ('T', 'L'): 'CASE WHEN {column_name} ~ \'^[0-9]+$\' '
-                'THEN {column_name}::bigint ELSE NULL END',
-    ('T', 'N'): 'CASE WHEN {column_name} ~ \'^[0-9]+(\\.[0-9]+)?$\' '
-                'THEN {column_name}::numeric ELSE NULL END',
-    ('T', 'B'): 'CASE WHEN {column_name} IN (\'true\',\'t\',\'1\',\'yes\') THEN true '
-                'WHEN {column_name} IN (\'false\',\'f\',\'0\',\'no\') THEN false '
-                'ELSE NULL END',
-    ('T', 'D'): 'CASE WHEN {column_name} ~ \'^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$\' '
-                'THEN {column_name}::date ELSE NULL END',
-    ('I', 'L'): None,    # integer -> bigint: sempre sicuro
-    ('I', 'N'): None,    # integer -> numeric: sempre sicuro
-    ('L', 'I'): True,    # bigint -> integer: PostgreSQL trunca se overflow
-    ('L', 'N'): None,    # bigint -> numeric: sempre sicuro
-    ('R', 'I'): None,    # smallint -> integer: sempre sicuro
-    ('R', 'L'): None,    # smallint -> bigint: sempre sicuro
-    ('N', 'I'): True,    # numeric -> integer: PostgreSQL trunca
-    ('N', 'L'): True,    # numeric -> bigint: PostgreSQL trunca
-    ('B', 'I'): True,    # boolean -> integer: true=1, false=0
-    ('D', 'DH'): None,   # date -> timestamp: sempre sicuro
-    ('DH', 'D'): True,   # timestamp -> date: perde l'ora
+    **BASE_TYPE_CONVERSIONS,
+
+    # PostgreSQL-specific text -> timestamp conversions
+    ('T', 'DH'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN {column_name}::timestamp ELSE NULL END",
+    ('T', 'DHZ'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN {column_name}::timestamp with time zone ELSE NULL END",
+    ('A', 'DH'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN {column_name}::timestamp ELSE NULL END",
+    ('A', 'DHZ'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN {column_name}::timestamp with time zone ELSE NULL END",
+
+    # Text -> Date
+    ('T', 'D'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN {column_name}::date ELSE NULL END",
+    ('A', 'D'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN {column_name}::date ELSE NULL END",
+    ('C', 'D'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN TRIM({column_name}) ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}' THEN TRIM({column_name})::date ELSE NULL END",
+
+    # Text -> Time
+    ('T', 'H'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{2}}:[0-9]{{2}}' THEN {column_name}::time ELSE NULL END",
+    ('A', 'H'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^[0-9]{{2}}:[0-9]{{2}}' THEN {column_name}::time ELSE NULL END",
+
+    # Text -> Numeric
+    ('T', 'N'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN {column_name}::numeric ELSE NULL END",
+    ('A', 'N'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN {column_name}::numeric ELSE NULL END",
+    ('C', 'N'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN TRIM({column_name}) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN TRIM({column_name})::numeric ELSE NULL END",
+
+    # Text -> Integer
+    ('T', 'I'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^-?[0-9]+$' THEN {column_name}::integer ELSE NULL END",
+    ('A', 'I'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^-?[0-9]+$' THEN {column_name}::integer ELSE NULL END",
+    ('C', 'I'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN TRIM({column_name}) ~ '^-?[0-9]+$' THEN TRIM({column_name})::integer ELSE NULL END",
+
+    # Text -> BigInt
+    ('T', 'L'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^-?[0-9]+$' THEN {column_name}::bigint ELSE NULL END",
+    ('A', 'L'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN {column_name} ~ '^-?[0-9]+$' THEN {column_name}::bigint ELSE NULL END",
+    ('C', 'L'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN TRIM({column_name}) ~ '^-?[0-9]+$' THEN TRIM({column_name})::bigint ELSE NULL END",
+
+    # Text -> Boolean (non-matching values become NULL)
+    ('T', 'B'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN LOWER({column_name}) IN ('true', 't', 'yes', 'y', '1') THEN TRUE WHEN LOWER({column_name}) IN ('false', 'f', 'no', 'n', '0', '') THEN FALSE ELSE NULL END",
+    ('A', 'B'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN LOWER({column_name}) IN ('true', 't', 'yes', 'y', '1') THEN TRUE WHEN LOWER({column_name}) IN ('false', 'f', 'no', 'n', '0', '') THEN FALSE ELSE NULL END",
+    ('C', 'B'): "CASE WHEN {column_name} IS NULL THEN NULL WHEN LOWER(TRIM({column_name})) IN ('true', 't', 'yes', 'y', '1') THEN TRUE WHEN LOWER(TRIM({column_name})) IN ('false', 'f', 'no', 'n', '0', '') THEN FALSE ELSE NULL END",
+
+    # Real -> Integer (with rounding)
+    ('R', 'I'): "CASE WHEN {column_name} IS NULL THEN NULL ELSE ROUND({column_name})::integer END",
+    ('R', 'L'): "CASE WHEN {column_name} IS NULL THEN NULL ELSE ROUND({column_name})::bigint END",
 }
 
 
@@ -101,18 +171,15 @@ class PgWriter(BaseWriter):
         Returns:
             str: Tipo SQL PostgreSQL.
         """
-        if dtype in DTYPE_TO_SQL:
-            return DTYPE_TO_SQL[dtype]
-        elif dtype == 'C':
-            return f'char({size})' if size else 'text'
-        elif dtype == 'A':
-            if size and ':' in size:
-                max_size = size.split(':')[1]
-                return f'varchar({max_size})'
-            return f'varchar({size})' if size else 'text'
-        elif dtype == 'N':
-            return f'numeric({size})' if size else 'numeric'
-        return 'text'
+        if dtype != 'N' and size:
+            if ':' in size:
+                size = size.split(':')[1]
+                dtype = 'A'
+            else:
+                dtype = 'C'
+        if size:
+            return f'{REV_TYPES_DICT[dtype]}({size})'
+        return REV_TYPES_DICT[dtype]
 
     def column_sql_definition(self, column_name, dtype, size=None,
                               notnull=False, default=None,
@@ -171,7 +238,7 @@ class PgWriter(BaseWriter):
         return f"CREATE DATABASE \"{dbname}\" ENCODING '{encoding}';"
 
     def create_schema_sql(self, schema_name):
-        """Genera CREATE SCHEMA IF NOT EXISTS.
+        """Genera CREATE SCHEMA.
 
         Args:
             schema_name: Nome dello schema.
@@ -179,7 +246,7 @@ class PgWriter(BaseWriter):
         Returns:
             str: Comando SQL.
         """
-        return f'CREATE SCHEMA IF NOT EXISTS "{schema_name}";'
+        return f'CREATE SCHEMA "{schema_name}";'
 
     def alter_column_sql(self, column_name, new_sql_type):
         """Genera ALTER COLUMN TYPE (senza USING).
@@ -374,18 +441,15 @@ class PgWriter(BaseWriter):
         return f'ALTER TABLE {full_table} ADD PRIMARY KEY ({pkeys});'
 
     def create_extension_sql(self, extension_name):
-        """Genera DROP + CREATE EXTENSION.
+        """Genera CREATE EXTENSION IF NOT EXISTS.
 
         Args:
             extension_name: Nome dell'estensione.
 
         Returns:
-            str: Comandi SQL.
+            str: Comando SQL.
         """
-        return (
-            f"DROP EXTENSION IF EXISTS {extension_name};\n"
-            f"CREATE EXTENSION {extension_name};"
-        )
+        return f"CREATE EXTENSION IF NOT EXISTS {extension_name};"
 
     def execute(self, sql, auto_commit=False, manager=False):
         """Esegue un comando SQL sul database PostgreSQL.

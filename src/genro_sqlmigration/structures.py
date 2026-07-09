@@ -35,11 +35,10 @@ Each entity is a dictionary containing at least:
 - ``attributes``: dictionary of type-specific attributes
 """
 
-import re
 import hashlib
 import json
+import re
 from collections import defaultdict
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -263,6 +262,7 @@ def new_relation_item(schema_name, table_name, columns, attributes=None,
     Returns:
         dict: Relation item with cleaned attributes and hashed name.
     """
+    attributes = dict(attributes or {})
     attributes['columns'] = columns
     hashed_entity_name = hashed_name(
         schema=schema_name, table=table_name,
@@ -297,6 +297,7 @@ def new_index_item(schema_name, table_name, columns, attributes=None,
     Returns:
         dict: Index item with cleaned attributes and hashed name.
     """
+    attributes = dict(attributes or {})
     hashed_entity_name = hashed_name(
         schema=schema_name, table=table_name,
         columns=columns, obj_type='idx'

@@ -100,10 +100,9 @@ class DiffMixin:
         """
         for diffevent, path, difflist in self.diff:
             # The path can be a list or a dot-separated string
-            if isinstance(path, list):
-                pathlist = path
-            else:
-                pathlist = path.split('.') if path else []
+            pathlist = path if isinstance(path, list) else (
+                path.split('.') if path else []
+            )
 
             # Check if the path contains 'attributes' - indicates a change
             # of an existing entity's attributes, not an add/remove of the entity

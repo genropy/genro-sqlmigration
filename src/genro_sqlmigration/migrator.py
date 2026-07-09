@@ -99,12 +99,12 @@ Typical usage example::
     report = migrator.verifyConversionBackups()
 """
 
-from .exceptions import NonExistingDbException
-from .structures import nested_defaultdict
+from .command_builder import CommandBuilderMixin
 from .db_extractor import DbExtractor
 from .diff_engine import DiffMixin
-from .command_builder import CommandBuilderMixin
+from .exceptions import NonExistingDbException
 from .executor import ExecutorMixin
+from .structures import nested_defaultdict
 
 
 class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
@@ -154,6 +154,7 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
         self.ignore_constraint_name = ignore_constraint_name
         self.force = force or backup  # backup implies force
         self.backup = backup
+        self.ormStructure = {}
         self.dbExtractor = DbExtractor(migrator=self)
 
     def prepareMigrationCommands(self):
@@ -208,6 +209,16 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
         self.extractSql(
             schemas=self.application_schemas + self.tenant_schemas
         )
+
+    def extractOrm(self):
+        """Keep the caller-injected ORM structure.
+
+        The package has no ORM extractor by design: the producer builds
+        the normalized JSON and assigns it to ``ormStructure`` before
+        running the migration. This hook only guarantees the attribute
+        is a dict when nothing was injected.
+        """
+        self.ormStructure = self.ormStructure or {}
 
     def extractSql(self, schemas=None):
         """Extract the JSON structure from the actual database.

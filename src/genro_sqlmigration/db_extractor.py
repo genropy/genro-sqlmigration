@@ -76,18 +76,24 @@ will be empty (``{}``). In this case the comparison with the ORM will
 produce commands for the complete database creation.
 """
 
-from .exceptions import NonExistingDbException
-
+from .exceptions import NonExistingDbException, SqlConnectionException
 from .structures import (
     COL_JSON_KEYS,
-    new_structure_root, new_schema_item, new_table_item,
-    new_column_item, new_constraint_item, new_relation_item,
-    new_index_item, new_extension_item, new_event_trigger_item,
-    nested_defaultdict, clean_attributes
+    clean_attributes,
+    nested_defaultdict,
+    new_column_item,
+    new_constraint_item,
+    new_event_trigger_item,
+    new_extension_item,
+    new_index_item,
+    new_relation_item,
+    new_schema_item,
+    new_structure_root,
+    new_table_item,
 )
 
 
-class DbExtractor(object):
+class DbExtractor:
     """Extract the database structure from the actual PostgreSQL instance.
 
     Queries the database via the adapter to obtain the actual definition
@@ -198,6 +204,10 @@ class DbExtractor(object):
                 result['event_triggers'] = adapter.struct_get_event_triggers()
         except NonExistingDbException:
             result = False
+        except SqlConnectionException:
+            # Unreachable server is not "database missing": let the caller
+            # see the real problem instead of generating a CREATE DATABASE.
+            raise
         finally:
             self.close_connection()
         return result
@@ -312,7 +322,7 @@ class DbExtractor(object):
                     schema_name, table_name,
                     multiple_unique_const['columns'],
                     constraint_type='UNIQUE',
-                    constraint_name=v['constraint_name']
+                    constraint_name=multiple_unique_const['constraint_name']
                 )
                 table_json['constraints'][const_item['entity_name']] = const_item
             # CHECK constraints not handled at this time

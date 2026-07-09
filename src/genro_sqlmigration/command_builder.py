@@ -79,7 +79,6 @@ may differ between ORM and DB but be semantically equivalent).
 import re
 
 from .exceptions import SqlMigrationError
-
 from .structures import hashed_name
 
 
@@ -581,14 +580,13 @@ class CommandBuilderMixin:
             )
 
             # Without --force: exception if column is not empty
-            if not self.force:
-                if not self.is_empty_column(item):
-                    raise SqlMigrationError(
-                        f'Incompatible type conversion {oldvalue}\u2192{newvalue} '
-                        f'on non-empty column {table_name}.{column_name}. '
-                        f'Use --force to convert (non-matching values become NULL) '
-                        f'or --backup to create backup columns first.'
-                    )
+            if not self.force and not self.is_empty_column(item):
+                raise SqlMigrationError(
+                    f'Incompatible type conversion {oldvalue}\u2192{newvalue} '
+                    f'on non-empty column {table_name}.{column_name}. '
+                    f'Use --force to convert (non-matching values become NULL) '
+                    f'or --backup to create backup columns first.'
+                )
 
             # With --backup: create backup column before conversion
             if self.backup:
@@ -738,7 +736,7 @@ class CommandBuilderMixin:
         add_sql = self.db.adapter.struct_constraint_sql(
             schema_name=item['schema_name'],
             table_name=item['table_name'],
-            constraint_name=constraints_dict['constraint_name'],
+            constraint_name=constraint_attr['constraint_name'],
             constraint_type=item['attributes']['constraint_type'],
             columns=item['attributes']['columns']
         )
