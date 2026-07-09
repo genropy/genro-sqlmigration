@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2025 Softwell S.r.l. - SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  Clean SQL-model schema (physical plane only) — the XSD counterpart of the
+  genro-sqlmigration JSON contract (structure-1.0.json). Describes a database
+  in the natural/idiomatic form (readable, GUI-friendly); a downstream step
+  converts a valid document into the normalized migrator JSON.
+
+  Scope: the entities the migrator consumes today — db / schema / table /
+  column / relation / constraint / index / extension. No semantic/application
+  attributes. Beyond-legacy entities (view/function/sequence/dbtype/trigger)
+  are out of scope until their migrator waves land.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:genro:sql-model:1.0"
+           xmlns:sqm="urn:genro:sql-model:1.0"
+           targetNamespace="urn:genro:sql-model:1.0"
+           elementFormDefault="qualified">
+
+  <!-- ==== leaf types ==================================================== -->
+
+  <!-- Normalized Genro dtype codes (closed set, mirrors DTYPE_CODES). -->
+  <xs:simpleType name="dtype">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="A"/><xs:enumeration value="B"/>
+      <xs:enumeration value="C"/><xs:enumeration value="D"/>
+      <xs:enumeration value="DH"/><xs:enumeration value="DHZ"/>
+      <xs:enumeration value="DT"/><xs:enumeration value="H"/>
+      <xs:enumeration value="HZ"/><xs:enumeration value="I"/>
+      <xs:enumeration value="L"/><xs:enumeration value="M"/>
+      <xs:enumeration value="N"/><xs:enumeration value="O"/>
+      <xs:enumeration value="P"/><xs:enumeration value="R"/>
+      <xs:enumeration value="T"/><xs:enumeration value="TSV"/>
+      <xs:enumeration value="VEC"/><xs:enumeration value="X"/>
+      <xs:enumeration value="Z"/><xs:enumeration value="jsonb"/>
+      <xs:enumeration value="serial"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Foreign-key referential action (mirrors fk_action). -->
+  <xs:simpleType name="fkAction">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="RESTRICT"/>
+      <xs:enumeration value="CASCADE"/>
+      <xs:enumeration value="SET NULL"/>
+      <xs:enumeration value="SET DEFAULT"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="constraintType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="UNIQUE"/>
+      <xs:enumeration value="CHECK"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Comma-joined column list (e.g. "a,b,c"), no spaces. -->
+  <xs:simpleType name="columnList">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[^,\s]+(,[^,\s]+)*"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ==== relation (child of a column) ================================= -->
+
+  <xs:complexType name="relation">
+    <!-- Physical FK only in this clean schema: foreign_key is implied.
+         'to' is the target column as schema.table.column. -->
+    <xs:attribute name="to" type="xs:string" use="required"/>
+    <xs:attribute name="on_delete" type="fkAction"/>
+    <xs:attribute name="on_update" type="fkAction"/>
+    <xs:attribute name="deferrable" type="xs:boolean"/>
+    <xs:attribute name="initially_deferred" type="xs:boolean"/>
+  </xs:complexType>
+
+  <!-- ==== column ======================================================= -->
+
+  <xs:complexType name="column">
+    <xs:sequence>
+      <xs:element name="relation" type="relation" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="dtype" type="dtype"/>
+    <xs:attribute name="size" type="xs:string"/>
+    <xs:attribute name="notnull" type="xs:boolean"/>
+    <xs:attribute name="sqldefault" type="xs:string"/>
+    <xs:attribute name="unique" type="xs:boolean"/>
+    <xs:attribute name="indexed" type="xs:boolean"/>
+    <xs:attribute name="sql_type" type="xs:string"/>
+    <xs:attribute name="extra_sql" type="xs:string"/>
+    <xs:attribute name="generated_expression" type="xs:string"/>
+    <xs:attribute name="comment" type="xs:string"/>
+  </xs:complexType>
+
+  <!-- ==== constraint / index =========================================== -->
+
+  <xs:complexType name="constraint">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="type" type="constraintType" use="required"/>
+    <xs:attribute name="columns" type="columnList"/>
+    <xs:attribute name="check_clause" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="index">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="columns" type="columnList" use="required"/>
+    <xs:attribute name="unique" type="xs:boolean"/>
+    <xs:attribute name="method" type="xs:string"/>
+    <xs:attribute name="where" type="xs:string"/>
+    <xs:attribute name="tablespace" type="xs:string"/>
+  </xs:complexType>
+
+  <!-- ==== table ======================================================== -->
+
+  <xs:complexType name="table">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="column" type="column"/>
+      <xs:element name="constraint" type="constraint"/>
+      <xs:element name="index" type="index"/>
+    </xs:choice>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="pkey" type="columnList"/>
+    <xs:attribute name="comment" type="xs:string"/>
+  </xs:complexType>
+
+  <!-- ==== schema ======================================================= -->
+
+  <xs:complexType name="schema">
+    <xs:sequence>
+      <xs:element name="table" type="table" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="sqlschema" type="xs:string"/>
+    <xs:attribute name="sqlprefix" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="extension">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+  </xs:complexType>
+
+  <!-- ==== db (root) ==================================================== -->
+
+  <xs:element name="db">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="schema" type="schema" minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="extension" type="extension" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute name="name" type="xs:string" use="required"/>
+    </xs:complexType>
+
+    <!-- Name uniqueness (the collection_key="name" of the grammar). -->
+    <xs:unique name="uniqueSchema">
+      <xs:selector xpath="sqm:schema"/>
+      <xs:field xpath="@name"/>
+    </xs:unique>
+  </xs:element>
+
+</xs:schema>
