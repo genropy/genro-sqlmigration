@@ -166,11 +166,11 @@ class ExecutorMixin:
         for pre_cmd in pre_commands:
             command_list.append(f"{pre_cmd};")
 
-        # Columns: all column commands are combined into a single
-        # ALTER TABLE with commas
-        col_commands = ',\n'.join(
+        # Columns: fragment assembly is dialect-specific (PostgreSQL joins
+        # all fragments into a single ALTER TABLE, see alter_table_commands)
+        col_fragments = [
             col['command'] for col in tbl_item['columns'].values()
-        )
+        ]
         constraint_commands = [
             con['command'] for con in tbl_item['constraints'].values()
         ]
@@ -185,9 +185,11 @@ class ExecutorMixin:
         if table_command:
             # New table: the command is the complete CREATE TABLE
             command_list.append(table_command)
-        elif col_commands:
-            # Existing table: ALTER TABLE with all columns
-            command_list.append(f"{alter_table_command}\n{col_commands};")
+        elif col_fragments:
+            # Existing table: ALTER TABLE statements assembled by the dialect
+            command_list += self.db.adapter.struct_alter_table_commands(
+                schema_name, table_name, col_fragments
+            )
 
         # Separate constraints: each constraint needs its own ALTER TABLE
         for constraint_sql in constraint_commands:

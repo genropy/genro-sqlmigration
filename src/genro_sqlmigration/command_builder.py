@@ -106,6 +106,18 @@ class CommandBuilderMixin:
         """
         return f'missing {kwargs}'
 
+    def unsupported(self, capability, context):
+        """Record a warning and return True if the dialect lacks ``capability``.
+
+        Used to gate DDL operations (see ``BaseWriter.CAPABILITIES``): the
+        handler skips the command and the skip surfaces in
+        ``migrator.warnings`` instead of failing the migration.
+        """
+        if capability in self.db.adapter.capabilities:
+            return False
+        self.warnings.append(f"unsupported '{capability}': skipped {context}")
+        return True
+
     # -------------------------------------------------------------------
     # Helpers for navigating the command structure
     # -------------------------------------------------------------------
@@ -244,7 +256,7 @@ class CommandBuilderMixin:
         Args:
             item: Column entity dictionary.
         """
-        sql = f'ADD COLUMN {self.columnSql(item)}'
+        sql = self.db.adapter.struct_add_column_sql(self.columnSql(item))
         table_dict = self.schema_tables(item['schema_name'])[item['table_name']]
         columns_dict = table_dict['columns']
         columns_dict[item['entity_name']]['command'] = sql
@@ -302,6 +314,12 @@ class CommandBuilderMixin:
             item: Constraint entity dictionary with type and columns
                 or check_clause.
         """
+        if self.unsupported(
+            'add_constraint',
+            f"constraint {item['attributes']['constraint_name']} on "
+            f"{item['schema_name']}.{item['table_name']}"
+        ):
+            return
         table_dict = self.schema_tables(item['schema_name'])[item['table_name']]
         constraints_dict = table_dict['constraints']
         sql = self.db.adapter.struct_constraint_sql(
@@ -426,6 +444,12 @@ class CommandBuilderMixin:
             oldvalue: Previous value in the DB.
             newvalue: New value from the ORM.
         """
+        if changed_attribute in ('size', 'dtype') and self.unsupported(
+            'alter_column_type',
+            f"{changed_attribute} change on {item['schema_name']}."
+            f"{item['table_name']}.{item['entity_name']}"
+        ):
+            return
         table_dict = self.schema_tables(item['schema_name'])[item['table_name']]
         columns_dict = table_dict['columns']
         column_name = item['entity_name']
@@ -459,8 +483,20 @@ class CommandBuilderMixin:
 
         elif changed_attribute == 'unique':
             if newvalue:
+                if self.unsupported(
+                    'add_constraint',
+                    f"unique on {item['schema_name']}."
+                    f"{item['table_name']}.{column_name}"
+                ):
+                    return
                 self.addColumnUniqueConstraint(item)
             else:
+                if self.unsupported(
+                    'drop_constraint',
+                    f"unique removal on {item['schema_name']}."
+                    f"{item['table_name']}.{column_name}"
+                ):
+                    return
                 columns = [column_name]
                 constraints_dict = table_dict['constraints']
                 constraint_name = hashed_name(
@@ -749,6 +785,12 @@ class CommandBuilderMixin:
             return
 
         # Rebuild: DROP old FK + ADD new FK
+        if self.unsupported(
+            'drop_constraint',
+            f"foreign key rebuild on {item['schema_name']}."
+            f"{item['table_name']} ({entity_name})"
+        ):
+            return
         add_sql = self.db.adapter.struct_foreign_key_sql(
             fk_name=relattr['constraint_name'],
             columns=relattr['columns'],
@@ -797,6 +839,12 @@ class CommandBuilderMixin:
                 )
             return
 
+        if self.unsupported(
+            'drop_constraint',
+            f"constraint rebuild on {item['schema_name']}."
+            f"{item['table_name']} ({entity_name})"
+        ):
+            return
         add_sql = self.db.adapter.struct_constraint_sql(
             schema_name=item['schema_name'],
             table_name=item['table_name'],

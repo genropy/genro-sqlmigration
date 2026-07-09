@@ -71,6 +71,11 @@ class PgAdapter(BaseAdapter):
             self._reader = PgReader(self.database.connection_params())
         return self._reader
 
+    @property
+    def capabilities(self):
+        """Dialect capability set, declared by the writer."""
+        return self.writer.CAPABILITIES
+
     # -- SQL generation (delegated to PgWriter) -------------------------------
 
     def createDbSql(self, dbname, encoding='UNICODE'):
@@ -157,6 +162,15 @@ class PgAdapter(BaseAdapter):
 
     def struct_drop_constraint_sql(self, constraint_name, **kwargs):
         return self.writer.drop_constraint_sql(constraint_name)
+
+    def struct_add_column_sql(self, column_definition):
+        return self.writer.add_column_sql(column_definition)
+
+    def struct_alter_table_commands(self, schema_name, table_name,
+                                    column_fragments):
+        return self.writer.alter_table_commands(
+            schema_name, table_name, column_fragments
+        )
 
 
 class PgDatabase(Database):

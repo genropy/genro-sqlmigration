@@ -146,8 +146,10 @@ class TestChangedConstraint:
         mock_db.adapter.struct_constraint_sql.return_value = (
             'CONSTRAINT uq_real UNIQUE("a", "b")'
         )
+        mock_db.adapter.capabilities = {'drop_constraint'}
         builder.db = mock_db
         builder.ignore_constraint_name = False
+        builder.warnings = []
 
         commands = nested_defaultdict()
         commands['db']['schemas']['myschema']['tables']['mytable'] = {

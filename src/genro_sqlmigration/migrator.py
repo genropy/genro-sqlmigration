@@ -153,6 +153,7 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
         self.force = force or backup  # backup implies force
         self.backup = backup
         self.ormStructure = {}
+        self.warnings = []
 
     def prepareMigrationCommands(self):
         """Prepare migration commands by comparing ORM and DB.
@@ -191,6 +192,7 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
 
         Then invokes the two extractors in sequence.
         """
+        self.warnings = []
         self.application_schemas = self.db.getApplicationSchemas()
         self.readOnly_schemas = self.db.readOnlySchemas()
         if self.excludeReadOnly:
@@ -203,6 +205,7 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
         except NonExistingDbException:
             self.tenant_schemas = []
         self.extractOrm()
+        self.applyCapabilities()
         self.extractSql(
             schemas=self.application_schemas + self.tenant_schemas
         )
@@ -221,6 +224,81 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
             self.ormStructure = {
                 k: v for k, v in self.ormStructure.items() if k == 'root'
             }
+
+    def applyCapabilities(self):
+        """Strip from ormStructure what the target dialect cannot represent.
+
+        Gating happens before the diff: an attribute the dialect cannot
+        store never appears on the DB side, so keeping it in the ORM
+        structure would produce a permanent false diff. Every removal
+        appends a warning to ``self.warnings``.
+        """
+        caps = self.db.adapter.capabilities
+        root = self.ormStructure.get('root')
+        if not root:
+            return
+        for entity_kind in ('extensions', 'event_triggers'):
+            if entity_kind not in caps and root.get(entity_kind):
+                names = ', '.join(root[entity_kind])
+                root[entity_kind] = {}
+                self.warnings.append(
+                    f"unsupported '{entity_kind}': ignored {names}"
+                )
+        for schema_name, schema in root.get('schemas', {}).items():
+            for table_name, table in schema.get('tables', {}).items():
+                self.applyTableCapabilities(
+                    caps, f'{schema_name}.{table_name}', table
+                )
+
+    def applyTableCapabilities(self, caps, tablepath, table):
+        """Strip unsupported attributes from one table of the ormStructure."""
+        if 'foreign_keys' not in caps and table.get('relations'):
+            names = ', '.join(table['relations'])
+            table['relations'] = {}
+            self.warnings.append(
+                f"unsupported 'foreign_keys': ignored relations on "
+                f"{tablepath} ({names})"
+            )
+        if 'table_constraints' not in caps and table.get('constraints'):
+            names = ', '.join(table['constraints'])
+            table['constraints'] = {}
+            self.warnings.append(
+                f"unsupported 'table_constraints': ignored constraints on "
+                f"{tablepath} ({names})"
+            )
+        if 'comments' not in caps:
+            if table['attributes'].pop('comment', None):
+                self.warnings.append(
+                    f"unsupported 'comments': ignored comment on {tablepath}"
+                )
+            for column_name, column in table.get('columns', {}).items():
+                if column['attributes'].pop('comment', None):
+                    self.warnings.append(
+                        f"unsupported 'comments': ignored comment on "
+                        f"{tablepath}.{column_name}"
+                    )
+        if 'fk_deferrable' not in caps:
+            for relation_name, relation in table.get('relations', {}).items():
+                for key in ('deferrable', 'initially_deferred'):
+                    if relation['attributes'].pop(key, None):
+                        self.warnings.append(
+                            f"unsupported 'fk_deferrable': ignored '{key}' "
+                            f"on {tablepath} relation {relation_name}"
+                        )
+        index_capabilities = (
+            ('index_where', 'where'), ('index_method', 'method'),
+            ('index_tablespace', 'tablespace'),
+            ('index_with_options', 'with_options'),
+        )
+        for capability, attribute in index_capabilities:
+            if capability in caps:
+                continue
+            for index_name, index in table.get('indexes', {}).items():
+                if index['attributes'].pop(attribute, None):
+                    self.warnings.append(
+                        f"unsupported '{capability}': ignored '{attribute}' "
+                        f"on {tablepath} index {index_name}"
+                    )
 
     def extractSql(self, schemas=None):
         """Extract the JSON structure from the actual database.

@@ -24,6 +24,40 @@ class BaseWriter(ABC):
     # Chiave: (old_dtype, new_dtype), Valore: None/True (semplice) o str (espressione USING).
     TYPE_CONVERSIONS = {}
 
+    # Capability flags declared by each dialect writer. Representation
+    # capabilities gate what the migrator keeps in the ORM structure before
+    # the diff (an attribute the dialect cannot store never appears on the
+    # DB side, so keeping it would produce a permanent false diff); DDL
+    # operation capabilities gate command generation in the command builder.
+    # Vocabulary:
+    #   representation: 'extensions', 'event_triggers', 'comments',
+    #     'foreign_keys', 'table_constraints', 'fk_deferrable',
+    #     'index_where', 'index_method', 'index_tablespace',
+    #     'index_with_options'
+    #   DDL operations: 'alter_column_type', 'drop_constraint',
+    #     'add_constraint'
+    CAPABILITIES = frozenset()
+
+    def add_column_sql(self, column_definition):
+        """Frammento ALTER TABLE che aggiunge una colonna (default PostgreSQL).
+
+        I dialetti senza la parola chiave COLUMN (es. MSSQL) fanno override.
+        """
+        return f'ADD COLUMN {column_definition}'
+
+    def alter_table_commands(self, schema_name, table_name, column_fragments):
+        """Assembla gli statement ALTER TABLE dai frammenti colonna.
+
+        Default: un solo statement con i frammenti uniti da virgola
+        (stile PostgreSQL). I dialetti con ALTER TABLE a singola azione
+        (es. SQLite) fanno override emettendo uno statement per frammento.
+        """
+        joined = ',\n'.join(column_fragments)
+        return [
+            f'ALTER TABLE {self.table_fullname(schema_name, table_name)}\n'
+            f'{joined};'
+        ]
+
     @abstractmethod
     def column_sql_type(self, dtype, size=None):
         """Restituisce il tipo SQL per un dtype e size dati.

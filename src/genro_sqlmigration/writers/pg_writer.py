@@ -158,6 +158,15 @@ class PgWriter(BaseWriter):
 
     TYPE_CONVERSIONS = PG_TYPE_CONVERSIONS
 
+    # PostgreSQL supports the full capability vocabulary (see BaseWriter).
+    CAPABILITIES = frozenset({
+        'extensions', 'event_triggers', 'comments',
+        'foreign_keys', 'table_constraints', 'fk_deferrable',
+        'index_where', 'index_method', 'index_tablespace',
+        'index_with_options', 'alter_column_type', 'drop_constraint',
+        'add_constraint',
+    })
+
     def __init__(self, connection_params=None):
         self.connection_params = connection_params
 
