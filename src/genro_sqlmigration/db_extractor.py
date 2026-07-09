@@ -241,6 +241,7 @@ class DbExtractor:
             table_name = c.pop('_pg_table_name')
             is_nullable = c.pop('_pg_is_nullable')
             column_name = c.pop('name')
+            table_comment = c.pop('_pg_table_comment', None)
             colattr = {
                 k: v for k, v in c.items()
                 if k in self.col_json_keys and v is not None
@@ -251,6 +252,9 @@ class DbExtractor:
                 self.json_schemas[schema_name]["tables"][table_name] = (
                     new_table_item(schema_name, table_name)
                 )
+            if table_name and table_comment:
+                self.json_schemas[schema_name]["tables"][table_name][
+                    'attributes']['comment'] = table_comment
             if column_name:
                 if is_nullable == 'NO':
                     colattr['notnull'] = True
@@ -316,6 +320,16 @@ class DbExtractor:
                 schema_name, table_name, d.pop('FOREIGN KEY', {})
             )
 
+            # CHECK: name-keyed, clause-based constraints
+            for check_name, check_const in d.pop('CHECK', {}).items():
+                const_item = new_constraint_item(
+                    schema_name, table_name, None,
+                    constraint_type='CHECK',
+                    constraint_name=check_name,
+                    check_clause=check_const.get('check_clause'),
+                )
+                table_json['constraints'][const_item['entity_name']] = const_item
+
             # Multi-column UNIQUE -> separate constraint
             for multiple_unique_const in multiple_unique.values():
                 const_item = new_constraint_item(
@@ -325,7 +339,6 @@ class DbExtractor:
                     constraint_name=multiple_unique_const['constraint_name']
                 )
                 table_json['constraints'][const_item['entity_name']] = const_item
-            # CHECK constraints not handled at this time
 
     def process_table_relations(self, schema_name, table_name, foreign_keys_dict):
         """Process the foreign keys of a table.

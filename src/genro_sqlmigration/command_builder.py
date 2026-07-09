@@ -194,16 +194,52 @@ class CommandBuilderMixin:
         sql = f"CREATE TABLE {sqltablename}(\n {joined_substatements}\n);"
         self.schema_tables(item['schema_name'])[item['table_name']]['command'] = sql
 
+        # Comments are standalone statements emitted after the table commands
+        if item['attributes'].get('comment'):
+            self.add_post_command(
+                item['schema_name'], item['table_name'],
+                self.db.adapter.struct_comment_on_table_sql(
+                    item['schema_name'], item['table_name'],
+                    item['attributes']['comment']
+                )
+            )
+        for col in item['columns'].values():
+            if col['attributes'].get('comment'):
+                self.add_post_command(
+                    item['schema_name'], item['table_name'],
+                    self.db.adapter.struct_comment_on_column_sql(
+                        item['schema_name'], item['table_name'],
+                        col['entity_name'], col['attributes']['comment']
+                    )
+                )
+
         # Indexes and relations are created after CREATE TABLE
         for index_item in item['indexes'].values():
             self.added_index(item=index_item)
         for rel_item in item['relations'].values():
             self.added_relation(item=rel_item)
 
+    def add_post_command(self, schema_name, table_name, sql):
+        """Queue a standalone statement to run after the table's commands.
+
+        Used for statements that cannot be ALTER TABLE clauses (e.g.
+        ``COMMENT ON``). The executor emits them last for the table.
+
+        Args:
+            schema_name: Name of the schema.
+            table_name: Name of the table.
+            sql: Statement without trailing semicolon.
+        """
+        table_dict = self.schema_tables(schema_name)[table_name]
+        if 'post_commands' not in table_dict:
+            table_dict['post_commands'] = []
+        table_dict['post_commands'].append(sql)
+
     def added_column(self, item=None, **kwargs):
         """Generate the ADD COLUMN command for a new column.
 
         The command is a SQL fragment to be used with ALTER TABLE.
+        A column comment becomes a standalone post command.
 
         Args:
             item: Column entity dictionary.
@@ -212,6 +248,14 @@ class CommandBuilderMixin:
         table_dict = self.schema_tables(item['schema_name'])[item['table_name']]
         columns_dict = table_dict['columns']
         columns_dict[item['entity_name']]['command'] = sql
+        if item['attributes'].get('comment'):
+            self.add_post_command(
+                item['schema_name'], item['table_name'],
+                self.db.adapter.struct_comment_on_column_sql(
+                    item['schema_name'], item['table_name'],
+                    item['entity_name'], item['attributes']['comment']
+                )
+            )
 
     def added_index(self, item=None, **kwargs):
         """Generate the CREATE INDEX command.
@@ -252,22 +296,24 @@ class CommandBuilderMixin:
         }
 
     def added_constraint(self, item=None, **kwargs):
-        """Generate the ADD CONSTRAINT command (e.g. multi-column UNIQUE).
+        """Generate the ADD CONSTRAINT command (multi-column UNIQUE or CHECK).
 
         Args:
-            item: Constraint entity dictionary with type and columns.
+            item: Constraint entity dictionary with type and columns
+                or check_clause.
         """
         table_dict = self.schema_tables(item['schema_name'])[item['table_name']]
         constraints_dict = table_dict['constraints']
         sql = self.db.adapter.struct_constraint_sql(
             schema_name=item['schema_name'],
             table_name=item['table_name'],
-            constraint_name=item['entity_name'],
+            constraint_name=item['attributes']['constraint_name'],
             constraint_type=item['attributes']['constraint_type'],
-            columns=item['attributes']['columns']
+            columns=item['attributes'].get('columns'),
+            check_clause=item['attributes'].get('check_clause')
         )
         constraints_dict[item['entity_name']] = {
-            "command": f'ADD {sql};'
+            "command": f'ADD {sql}'
         }
 
     def added_extension(self, item=None, **kwargs):
@@ -314,6 +360,14 @@ class CommandBuilderMixin:
             )
             self.schema_tables(schema_name)[table_name]['command'] = (
                 f"{drop_pk_sql}\n{add_pk_sql}"
+            )
+        elif changed_attribute == 'comment':
+            # COMMENT ON is an idempotent replace; None clears the comment
+            self.add_post_command(
+                schema_name, table_name,
+                self.db.adapter.struct_comment_on_table_sql(
+                    schema_name, table_name, newvalue
+                )
             )
 
     def is_empty_column(self, item):
@@ -420,6 +474,16 @@ class CommandBuilderMixin:
                     table_name=item['table_name'],
                 )
                 constraints_dict[constraint_name] = {"command": sql}
+
+        elif changed_attribute == 'comment':
+            # COMMENT ON is an idempotent replace; None clears the comment
+            self.add_post_command(
+                item['schema_name'], item['table_name'],
+                self.db.adapter.struct_comment_on_column_sql(
+                    item['schema_name'], item['table_name'],
+                    column_name, newvalue
+                )
+            )
 
         elif changed_attribute in ('generated_expression', 'extra_sql'):
             # These attributes are not automatically migratable
@@ -738,10 +802,11 @@ class CommandBuilderMixin:
             table_name=item['table_name'],
             constraint_name=constraint_attr['constraint_name'],
             constraint_type=item['attributes']['constraint_type'],
-            columns=item['attributes']['columns']
+            columns=item['attributes'].get('columns'),
+            check_clause=item['attributes'].get('check_clause')
         )
         constraints_dict[f'drop_{entity_name}']['command'] = (
-            f"DROP CONSTRAINT {constraint_attr['constraint_name']};"
+            f"DROP CONSTRAINT {constraint_attr['constraint_name']}"
         )
         constraints_dict[f'add_{entity_name}']['command'] = f"ADD {add_sql}"
 

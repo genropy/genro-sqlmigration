@@ -44,6 +44,20 @@ from collections import defaultdict
 # Constants
 # ---------------------------------------------------------------------------
 
+FORMAT_VERSION = '1.0'
+"""Version of the normalized JSON contract.
+
+Producers may declare it as an optional top-level ``format_version``
+key next to ``root``; the package validates and strips it at the
+boundary (the migrator diffs the ``root`` subtree only).
+"""
+
+DTYPE_CODES = (
+    'A', 'B', 'C', 'D', 'DH', 'DHZ', 'DT', 'H', 'HZ', 'I', 'L', 'M',
+    'N', 'O', 'P', 'R', 'T', 'TSV', 'VEC', 'X', 'Z', 'jsonb', 'serial',
+)
+"""Closed set of normalized dtype codes accepted by the contract."""
+
 ENTITY_TREE = {
     'schemas': {
         'tables': {
@@ -62,7 +76,7 @@ Used to recursively navigate the JSON structure.
 
 COL_JSON_KEYS = (
     "dtype", "sql_type", "notnull", "sqldefault", "size",
-    "unique", "extra_sql", "generated_expression"
+    "unique", "extra_sql", "generated_expression", "comment"
 )
 """Column attribute keys preserved in the JSON structure.
 
@@ -210,22 +224,42 @@ def new_column_item(schema_name, table_name, column_name, attributes=None):
 
 
 def new_constraint_item(schema_name, table_name, columns, constraint_type,
-                        constraint_name=None):
-    """Create a JSON item for a constraint (e.g. multi-column UNIQUE).
+                        constraint_name=None, check_clause=None):
+    """Create a JSON item for a constraint (multi-column UNIQUE or CHECK).
 
-    The constraint name is automatically generated via MD5 hash if not
-    specified, ensuring uniqueness and determinism.
+    UNIQUE constraints get a structural hashed name computed from the
+    columns. CHECK constraints are clause-based: hashing on columns is
+    meaningless, so they are keyed by their user-given name, which is
+    therefore required.
 
     Args:
         schema_name: Name of the schema.
         table_name: Name of the table.
-        columns: List of columns involved in the constraint.
-        constraint_type: Type of constraint (e.g. "UNIQUE", "CHECK").
-        constraint_name: Explicit constraint name (optional).
+        columns: List of columns involved in the constraint (UNIQUE).
+        constraint_type: Type of constraint ("UNIQUE" or "CHECK").
+        constraint_name: Explicit constraint name (required for CHECK).
+        check_clause: Constraint clause (CHECK only). Producers must
+            write it as PostgreSQL prints it (e.g. ``(rating >= 0)``)
+            to avoid spurious diffs against the introspected form.
 
     Returns:
-        dict: Constraint item with hashed name.
+        dict: Constraint item keyed by hashed name (UNIQUE) or by the
+        constraint name (CHECK).
     """
+    if constraint_type == 'CHECK':
+        if not constraint_name:
+            raise ValueError('CHECK constraints require an explicit constraint_name')
+        return {
+            "entity": "constraint",
+            "entity_name": constraint_name,
+            "attributes": {
+                "constraint_name": constraint_name,
+                "constraint_type": "CHECK",
+                "check_clause": check_clause,
+            },
+            "schema_name": schema_name,
+            "table_name": table_name,
+        }
     hashed_entity_name = hashed_name(
         schema=schema_name, table=table_name,
         columns=columns, obj_type='cst'

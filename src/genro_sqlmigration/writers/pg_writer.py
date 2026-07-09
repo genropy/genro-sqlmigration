@@ -440,6 +440,46 @@ class PgWriter(BaseWriter):
         full_table = self.table_fullname(schema_name, table_name)
         return f'ALTER TABLE {full_table} ADD PRIMARY KEY ({pkeys});'
 
+    def comment_on_column_sql(self, schema_name, table_name, column_name,
+                              comment):
+        """Genera COMMENT ON COLUMN (idempotente; None rimuove il commento).
+
+        Args:
+            schema_name: Nome dello schema.
+            table_name: Nome della tabella.
+            column_name: Nome della colonna.
+            comment: Testo del commento, o None per rimuoverlo.
+
+        Returns:
+            str: Comando SQL senza punto e virgola finale.
+        """
+        value = self._comment_literal(comment)
+        return (
+            f'COMMENT ON COLUMN "{schema_name}"."{table_name}"."{column_name}" '
+            f'IS {value}'
+        )
+
+    def comment_on_table_sql(self, schema_name, table_name, comment):
+        """Genera COMMENT ON TABLE (idempotente; None rimuove il commento).
+
+        Args:
+            schema_name: Nome dello schema.
+            table_name: Nome della tabella.
+            comment: Testo del commento, o None per rimuoverlo.
+
+        Returns:
+            str: Comando SQL senza punto e virgola finale.
+        """
+        value = self._comment_literal(comment)
+        return f'COMMENT ON TABLE "{schema_name}"."{table_name}" IS {value}'
+
+    def _comment_literal(self, comment):
+        """Quota il testo di un commento come literal SQL (NULL se None)."""
+        if comment is None:
+            return 'NULL'
+        escaped = comment.replace("'", "''")
+        return f"'{escaped}'"
+
     def create_extension_sql(self, extension_name):
         """Genera CREATE EXTENSION IF NOT EXISTS.
 

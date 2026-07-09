@@ -198,6 +198,10 @@ class ExecutorMixin:
             idx['command'] for idx in tbl_item['indexes'].values()
         ]
 
+        # Post-commands: standalone statements emitted last (e.g. COMMENT ON)
+        for post_cmd in tbl_item.get('post_commands', []):
+            command_list.append(f"{post_cmd};")
+
         return {
             "commands": command_list,
             "relation_commands": relation_command_list

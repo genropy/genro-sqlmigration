@@ -259,6 +259,36 @@ class BaseWriter(ABC):
         ...
 
     @abstractmethod
+    def comment_on_column_sql(self, schema_name, table_name, column_name,
+                              comment):
+        """Genera il comando COMMENT ON COLUMN.
+
+        Args:
+            schema_name: Nome dello schema.
+            table_name: Nome della tabella.
+            column_name: Nome della colonna.
+            comment: Testo del commento, o None per rimuoverlo.
+
+        Returns:
+            str: Comando SQL.
+        """
+        ...
+
+    @abstractmethod
+    def comment_on_table_sql(self, schema_name, table_name, comment):
+        """Genera il comando COMMENT ON TABLE.
+
+        Args:
+            schema_name: Nome dello schema.
+            table_name: Nome della tabella.
+            comment: Testo del commento, o None per rimuoverlo.
+
+        Returns:
+            str: Comando SQL.
+        """
+        ...
+
+    @abstractmethod
     def execute(self, sql, auto_commit=False, manager=False):
         """Esegue un comando SQL sul database.
 

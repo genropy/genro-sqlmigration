@@ -58,7 +58,15 @@ SCHEMA_INFO_SQL = """
         c.is_nullable,
         c.column_default,
         c.numeric_precision,
-        c.numeric_scale
+        c.numeric_scale,
+        CASE WHEN c.table_name IS NOT NULL THEN col_description(
+            format('%%I.%%I', c.table_schema, c.table_name)::regclass,
+            c.ordinal_position
+        ) END AS comment,
+        CASE WHEN t.table_name IS NOT NULL THEN obj_description(
+            format('%%I.%%I', t.table_schema, t.table_name)::regclass,
+            'pg_class'
+        ) END AS table_comment
     FROM information_schema.schemata s
     LEFT JOIN information_schema.tables t
         ON s.schema_name = t.table_schema
@@ -144,16 +152,16 @@ FOREIGN_KEY_SQL = """
 
 CHECK_CONSTRAINT_SQL = """
     SELECT
-        tc.constraint_schema AS schema_name,
-        tc.table_name AS table_name,
-        tc.constraint_name AS constraint_name,
-        ch.check_clause AS check_clause
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.check_constraints AS ch
-        ON tc.constraint_name = ch.constraint_name
-        AND tc.constraint_schema = ch.constraint_schema
-    WHERE tc.constraint_type = 'CHECK'
-        AND tc.constraint_schema = ANY(%s);
+        nsp.nspname AS schema_name,
+        cls.relname AS table_name,
+        con.conname AS constraint_name,
+        pg_get_expr(con.conbin, con.conrelid) AS check_clause
+    FROM pg_constraint con
+    JOIN pg_class cls ON cls.oid = con.conrelid
+    JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+    WHERE con.contype = 'c'
+        AND nsp.nspname = ANY(%s)
+    ORDER BY con.conname;
 """
 
 INDEXES_SQL = """
@@ -266,7 +274,8 @@ class PgTestAdapter(BaseAdapter):
         for row in self.raw_fetch(SCHEMA_INFO_SQL, (list(schemas),)):
             (schema_name, table_name, column_name, data_type,
              char_max_length, is_nullable, column_default,
-             numeric_precision, numeric_scale) = row
+             numeric_precision, numeric_scale,
+             comment, table_comment) = row
             col = {
                 '_pg_schema_name': schema_name,
                 '_pg_table_name': table_name,
@@ -277,6 +286,8 @@ class PgTestAdapter(BaseAdapter):
                 'sqldefault': column_default,
                 '_pg_numeric_precision': numeric_precision,
                 '_pg_numeric_scale': numeric_scale,
+                'comment': comment,
+                '_pg_table_comment': table_comment,
             }
             if col['sqldefault'] and col['sqldefault'].startswith('nextval('):
                 col['_pg_default'] = col.pop('sqldefault')
@@ -472,6 +483,15 @@ class PgTestAdapter(BaseAdapter):
 
     def struct_create_extension_sql(self, extension_name):
         return self.writer.create_extension_sql(extension_name)
+
+    def struct_comment_on_column_sql(self, schema_name, table_name,
+                                     column_name, comment):
+        return self.writer.comment_on_column_sql(
+            schema_name, table_name, column_name, comment
+        )
+
+    def struct_comment_on_table_sql(self, schema_name, table_name, comment):
+        return self.writer.comment_on_table_sql(schema_name, table_name, comment)
 
     def struct_drop_table_pkey_sql(self, schema_name, table_name):
         return self.writer.drop_table_pkey_sql(schema_name, table_name)

@@ -99,6 +99,7 @@ class SrcTable:
         self.attributes = {}
         self.columns = {}
         self.composite_columns = {}
+        self.check_constraints = {}
 
     @property
     def sqlname(self):
@@ -147,6 +148,14 @@ class SrcTable:
             {k: v for k, v in attributes.items() if v is not None}
         )
         return col
+
+    def checkConstraint(self, name, check_clause):
+        """Declare a named CHECK constraint.
+
+        The clause must be written as PostgreSQL prints it (e.g.
+        ``(rating >= 0)``) to compare clean against introspection.
+        """
+        self.check_constraints[name] = check_clause
 
     def __getitem__(self, key):
         if key == 'columns':
@@ -240,6 +249,8 @@ class OrmJsonProducer:
         )
         table_entity = new_table_item(schema_name, table_name)
         table_entity['attributes']['pkeys'] = pkeys
+        if tblobj.attributes.get('comment'):
+            table_entity['attributes']['comment'] = tblobj.attributes['comment']
         self.schemas[schema_name]['tables'][table_name] = table_entity
 
         for colobj in tblobj.columns.values():
@@ -249,6 +260,13 @@ class OrmJsonProducer:
         for compositecol in tblobj.composite_columns.values():
             self.fill_json_relations_and_indexes(compositecol)
             self.fill_multiple_unique_constraint(compositecol)
+
+        for check_name, check_clause in tblobj.check_constraints.items():
+            check_item = new_constraint_item(
+                schema_name, table_name, None, 'CHECK',
+                constraint_name=check_name, check_clause=check_clause
+            )
+            table_entity['constraints'][check_item['entity_name']] = check_item
 
     def fill_json_column(self, colobj):
         table_name = colobj.table.sqlname

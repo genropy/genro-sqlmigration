@@ -76,6 +76,15 @@ class BaseAdapter(ABC):
         ...
 
     @abstractmethod
+    def struct_comment_on_column_sql(self, schema_name, table_name,
+                                     column_name, comment):
+        ...
+
+    @abstractmethod
+    def struct_comment_on_table_sql(self, schema_name, table_name, comment):
+        ...
+
+    @abstractmethod
     def struct_drop_table_pkey_sql(self, schema_name, table_name):
         ...
 
