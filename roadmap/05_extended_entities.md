@@ -1,6 +1,6 @@
 # M2.5 — Extended Entities (views, functions, triggers, types, sequences)
 
-**Version**: 0.1.0 · **Last Updated**: 2026-07-08 · **Status**: 🔴 DA REVISIONARE
+**Version**: 0.2.0 · **Last Updated**: 2026-07-09 · **Status**: 🔴 DA REVISIONARE
 
 Owner request (2026-07-08): the migration system must also define and
 migrate views, procedures/functions, triggers and related entities
@@ -38,14 +38,18 @@ Order driven by value (views most requested) and dependencies
 (triggers require functions; types require the executor ordering
 extension). Wave implementation starts ONLY with M1 green.
 
-**Prerequisite refactor** (post-M1, pre-wave-1): consolidate the dual
-extraction path — `DbExtractor` calls `db.adapter.struct_get_*` while
-`PgReader` has its own `_process_*`; the introspection surface is not
-declared on `BaseAdapter` (`database.py` declares only writer-side
-`struct_*_sql` + `execute`/`connect`). Declare it once (on
-`BaseReader`, adapters delegating) so each wave implements
-introspection exactly once. Mechanical, fully protected by the M1
-suite.
+**Prerequisite refactor** — DONE 2026-07-09: the dual extraction path
+is consolidated. `BaseReader` owns the concrete `get_json_struct`
+template method plus the shared `process_*` methods (moved verbatim
+from the former `DbExtractor`, now deleted); `PgReader` implements the
+per-dialect `fetch_*` hooks with the queries formerly in the test
+adapter; `BaseAdapter` declares the `reader` property and delegates
+`struct_is_empty_column` to it; the #655 error taxonomy now covers the
+reader (`NonExistingDbException` → `{}`, `SqlConnectionException`
+propagates — the old `except Exception: return {}` is gone). Each wave
+now implements introspection exactly once: one `fetch_*` hook on the
+dialect reader, one shared `process_*` on `BaseReader`. Suite
+unchanged: 106 passed + 5 skipped.
 
 ## 2. Contract shape per entity
 
@@ -93,10 +97,14 @@ Rules:
   normalizes input — inserts missing empty containers keyed by
   `format_version`. This is the concrete compatibility story for the
   wave bumps.
-- **Function keying** — open (§7): identity-signature key
-  `name(argtypes)` (overload-correct; signature change naturally
-  becomes removed+added, matching `CREATE OR REPLACE` limits) vs
-  name-only with a documented "no overloads" v1 rule.
+- **Function keying** (decided 2026-07-09, §7.3): dict key = the
+  identity signature `name(argtypes)`, aligned with
+  `pg_get_function_identity_arguments`: canonical PG type names
+  (`integer`, not `int`), IN/INOUT/VARIADIC modes only, no OUT
+  args, no defaults. Overload-correct; a signature change naturally
+  becomes removed+added, matching `CREATE OR REPLACE` limits. The
+  canonical-spelling constraint already binds
+  `arguments`/`return_type` for verbatim comparison (§3).
 - **Attribute cleaning** applies unchanged (None/False/empty
   stripped): e.g. `materialized: false` never appears — schemas model
   these as optional-absent.
@@ -127,7 +135,11 @@ idempotence. Per entity:
   positives. Live-DB access during command preparation has precedent
   (`is_empty_column` in `command_builder`). Probe failure (definition
   references a relation added in the same run) → assume changed →
-  `CREATE OR REPLACE VIEW`, converging at the next run. Rejected:
+  `CREATE OR REPLACE VIEW`, converging at the next run. Decided
+  2026-07-09 (§7.2): the live-DB probe is an accepted diff-time
+  dependency; no connection is treated as probe failure →
+  assume-changed, documented as degraded behavior, not an official
+  pure-JSON mode. Rejected:
   hash marker in `COMMENT ON` (collides with wave-0 comments),
   package-owned metadata table (stateless-diff violation),
   Python-side SQL normalizer (unwinnable).
@@ -178,7 +190,7 @@ global tail: FK relations (existing) → views (producer order) → matviews →
 
 | Entity | ALTER-able | Drop+recreate | Notes |
 |---|---|---|---|
-| View | `CREATE OR REPLACE VIEW` only add-columns-at-end | incompatible column change (rename/retype/remove) | v1 default: always OR REPLACE, failure surfaces. Optional `rebuild_views` flag (§7) |
+| View | `CREATE OR REPLACE VIEW` only add-columns-at-end | incompatible column change (rename/retype/remove) | Decided 2026-07-09 (§7.1): wave 1 ships OR REPLACE only, failure surfaces; `rebuild_views` deferred to backlog (doc `01` §6) |
 | Matview | nothing | any definition change; `materialized` flip | recreate `WITH [NO] DATA` |
 | Function | body → `CREATE OR REPLACE`; volatility/security → `ALTER FUNCTION` | return/arg types, FUNCTION↔PROCEDURE | signature keying turns these into removed+added |
 | Trigger | rename only | any other change → DROP+CREATE | `CREATE OR REPLACE TRIGGER` needs PG14+; use DROP+CREATE |
@@ -232,18 +244,26 @@ path/attribute walking, verified).
   raise); `sql_type` emission for user-defined column types; fix the
   §4 extensions-ordering discrepancy.
 
-## 7. Open questions (owner input needed — do not block M1)
+## 7. Resolved questions (owner decisions, 2026-07-09)
 
-1. **View change default**: conservative `CREATE OR REPLACE` only
-   (fails loudly on incompatible column changes) vs opt-in
-   `rebuild_views` flag (`DROP ... CASCADE` + recreate all declared
-   views in producer order — safe only for model-managed views).
-2. **Live-DB canonicalization probe**: acceptable as a diff-time
-   dependency? It makes view/CHECK comparison impossible against a
-   snapshot without a connection. Accept, or require a pure-JSON
-   fallback mode (assume-changed)?
-3. **Function keying**: `name(argtypes)` identity signature vs
-   name-only + "no overloads" v1 contract rule.
+1. **View change default → conservative `CREATE OR REPLACE` only.**
+   Incompatible column changes fail loudly in the migration report;
+   no implicit drop, consistent with the package safety stance
+   (`removeDisabled` default, no-op `removed_*`). The opt-in
+   `rebuild_views` flag is NOT built in wave 1 — backlogged in doc
+   `01` §6 (a targeted drop of the declared views in reverse order
+   is preferred over `DROP ... CASCADE` if a real case demands it).
+2. **Live-DB canonicalization probe → accepted** as a diff-time
+   dependency for view/CHECK comparison: the DB-side structure comes
+   from live introspection anyway, and `is_empty_column` sets the
+   precedent. No connection ≡ probe failure → assume-changed (an
+   error branch the design already requires), documented as degraded
+   behavior — no official pure-JSON precision mode.
+3. **Function keying → identity signature `name(argtypes)`.**
+   Correct by construction against any real DB (overloads exist
+   whether or not the model declares them, so extraction stays
+   well-defined); DB-side keys come canonical and free from
+   `pg_get_function_identity_arguments`. Key format specified in §2.
 
 ## 8. Test plan per wave (M1-consistent: exact SQL → apply → idempotence)
 

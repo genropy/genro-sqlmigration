@@ -1,6 +1,6 @@
 # Charter and Milestones
 
-**Version**: 0.1.0 · **Last Updated**: 2026-07-08 · **Status**: 🔴 DA REVISIONARE
+**Version**: 0.1.1 · **Last Updated**: 2026-07-09 · **Status**: 🔴 DA REVISIONARE
 
 ## 1. Goal
 
@@ -103,6 +103,11 @@ Scope fixed by the owner (2026-07-08):
   detect renames; today rename = drop+add).
 - Migration atomicity option (legacy applies with per-statement
   autocommit; a failed run leaves the DB partially migrated).
+- Opt-in `rebuild_views` flag for incompatible view changes (wave 1
+  ships conservative `CREATE OR REPLACE` only — doc `05` §7.1,
+  decided 2026-07-09). If a real case demands it, prefer a targeted
+  drop of the declared views in reverse producer order over
+  `DROP ... CASCADE`.
 - ~~Missing entities inherited from the legacy roadmap~~ — promoted
   to milestone M2.5 (owner request 2026-07-08), design in doc `05`.
 
