@@ -16,12 +16,14 @@ Main components:
 - :class:`SqlMigrator`: Orchestrator that coordinates the full migration flow.
 - :mod:`readers`: Database-specific introspection (read actual DB structure).
 - :mod:`writers`: Database-specific SQL generation (write migration commands).
+- :mod:`adapters`: Concrete Database/BaseAdapter pairs per dialect.
 - :mod:`structures`: Normalized JSON format (the contract between components).
 - :mod:`diff_engine`: Structure comparison using dictdiffer.
 - :mod:`command_builder`: SQL command generation from diff events.
 - :mod:`executor`: SQL assembly and execution.
 """
 
+from genro_sqlmigration.adapters import PgAdapter, PgDatabase
 from genro_sqlmigration.migrator import SqlMigrator
 from genro_sqlmigration.structures import (
     FORMAT_VERSION,
@@ -39,6 +41,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "FORMAT_VERSION",
+    "PgAdapter",
+    "PgDatabase",
     "SqlMigrator",
     "StructureValidator",
     "new_column_item",

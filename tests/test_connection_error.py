@@ -20,13 +20,12 @@ import psycopg
 import pytest
 
 from genro_sqlmigration import SqlMigrator
+from genro_sqlmigration.adapters import PgAdapter
 from genro_sqlmigration.exceptions import (
     NonExistingDbException,
     SqlConnectionException,
 )
 from genro_sqlmigration.readers import PgReader
-
-from .support.pg_database import PgTestAdapter
 
 
 def _adapter(dbname='test_db'):
@@ -35,7 +34,7 @@ def _adapter(dbname='test_db'):
     database.connection_params.return_value = {
         'host': 'localhost', 'dbname': dbname,
     }
-    return PgTestAdapter(database)
+    return PgAdapter(database)
 
 
 class TestAdapterConnectionError:
