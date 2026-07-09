@@ -5,9 +5,19 @@
 adapters - Concrete Database/BaseAdapter pairs per dialect
 ===========================================================
 
-Each dialect contributes one module (PostgreSQL today, others with M3).
+Each dialect contributes one module: PostgreSQL, SQLite, MySQL
+(MSSQL to come).
 """
 
+from genro_sqlmigration.adapters.mysql_adapter import MysqlAdapter, MysqlDatabase
 from genro_sqlmigration.adapters.pg_adapter import PgAdapter, PgDatabase
+from genro_sqlmigration.adapters.sqlite_adapter import SqliteAdapter, SqliteDatabase
 
-__all__ = ["PgAdapter", "PgDatabase"]
+__all__ = [
+    "MysqlAdapter",
+    "MysqlDatabase",
+    "PgAdapter",
+    "PgDatabase",
+    "SqliteAdapter",
+    "SqliteDatabase",
+]

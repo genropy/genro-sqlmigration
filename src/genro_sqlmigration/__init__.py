@@ -23,7 +23,14 @@ Main components:
 - :mod:`executor`: SQL assembly and execution.
 """
 
-from genro_sqlmigration.adapters import PgAdapter, PgDatabase
+from genro_sqlmigration.adapters import (
+    MysqlAdapter,
+    MysqlDatabase,
+    PgAdapter,
+    PgDatabase,
+    SqliteAdapter,
+    SqliteDatabase,
+)
 from genro_sqlmigration.migrator import SqlMigrator
 from genro_sqlmigration.structures import (
     FORMAT_VERSION,
@@ -41,8 +48,12 @@ __version__ = "0.1.0"
 
 __all__ = [
     "FORMAT_VERSION",
+    "MysqlAdapter",
+    "MysqlDatabase",
     "PgAdapter",
     "PgDatabase",
+    "SqliteAdapter",
+    "SqliteDatabase",
     "SqlMigrator",
     "StructureValidator",
     "new_column_item",

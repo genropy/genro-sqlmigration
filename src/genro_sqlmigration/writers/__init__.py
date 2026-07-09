@@ -2,23 +2,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-writers - Moduli di generazione SQL
-====================================
+writers - SQL generation modules
+=================================
 
-I writer generano SQL specifico per ogni database engine.
-Forniscono i metodi per creare definizioni di colonne, constraint,
-indici, foreign key e comandi ALTER TABLE.
+Writers generate SQL specific to each database engine: column
+definitions, constraints, indexes, foreign keys and ALTER TABLE
+commands.
 
-- :class:`PgWriter`: Generazione SQL per PostgreSQL.
-- SQLite writer: (futuro)
+- :class:`PgWriter`: PostgreSQL
+- :class:`SqliteWriter`: SQLite
+- :class:`MysqlWriter`: MySQL
 
-Tutti i writer ereditano da :class:`BaseWriter`.
+All writers inherit from :class:`BaseWriter`.
 """
 
 from genro_sqlmigration.writers.base_writer import BaseWriter
+from genro_sqlmigration.writers.mysql_writer import MysqlWriter
 from genro_sqlmigration.writers.pg_writer import PgWriter
+from genro_sqlmigration.writers.sqlite_writer import SqliteWriter
 
 __all__ = [
     "BaseWriter",
+    "MysqlWriter",
     "PgWriter",
+    "SqliteWriter",
 ]
