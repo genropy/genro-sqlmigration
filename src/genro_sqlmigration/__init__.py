@@ -24,6 +24,7 @@ Main components:
 
 from genro_sqlmigration.migrator import SqlMigrator
 from genro_sqlmigration.structures import (
+    FORMAT_VERSION,
     new_column_item,
     new_constraint_item,
     new_index_item,
@@ -32,11 +33,14 @@ from genro_sqlmigration.structures import (
     new_structure_root,
     new_table_item,
 )
+from genro_sqlmigration.validation import StructureValidator
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "FORMAT_VERSION",
     "SqlMigrator",
+    "StructureValidator",
     "new_column_item",
     "new_constraint_item",
     "new_index_item",

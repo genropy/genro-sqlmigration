@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://genropy.org/schemas/sqlmigration/structure-1.0.json",
+  "title": "genro-sqlmigration normalized structure v1.0",
+  "description": "The JSON contract between producers (ORM extractors) and the migration engine. Attributes are cleaned: None/False/empty values and 'NO ACTION' never appear.",
+  "type": "object",
+  "properties": {
+    "format_version": {"const": "1.0"},
+    "root": {"$ref": "#/$defs/db"}
+  },
+  "required": ["root"],
+  "additionalProperties": false,
+  "$defs": {
+    "dtype": {
+      "enum": ["A", "B", "C", "D", "DH", "DHZ", "DT", "H", "HZ", "I", "L", "M", "N", "O", "P", "R", "T", "TSV", "VEC", "X", "Z", "jsonb", "serial"]
+    },
+    "fk_action": {
+      "enum": ["RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"]
+    },
+    "db": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "db"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "schemas": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/schema"}
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/extension"}
+        },
+        "event_triggers": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/event_trigger"}
+        }
+      },
+      "required": ["entity", "entity_name", "schemas"],
+      "additionalProperties": false
+    },
+    "schema": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "schema"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "tables": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/table"}
+        },
+        "schema_name": {"type": "string"}
+      },
+      "required": ["entity", "entity_name", "tables"],
+      "additionalProperties": false
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "table"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {
+          "type": "object",
+          "properties": {
+            "pkeys": {"type": ["string", "null"]},
+            "comment": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "columns": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/column"}
+        },
+        "relations": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/relation"}
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/constraint"}
+        },
+        "indexes": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/index"}
+        },
+        "schema_name": {"type": "string"},
+        "table_name": {"type": "string"}
+      },
+      "required": ["entity", "entity_name", "attributes", "columns"],
+      "additionalProperties": false
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "column"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {
+          "type": "object",
+          "properties": {
+            "dtype": {"$ref": "#/$defs/dtype"},
+            "sql_type": {"type": "string"},
+            "notnull": {"enum": [true, "_auto_"]},
+            "sqldefault": {"type": "string"},
+            "size": {"type": "string"},
+            "unique": {"const": true},
+            "extra_sql": {"type": "string"},
+            "generated_expression": {"type": "string"},
+            "comment": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "schema_name": {"type": "string"},
+        "table_name": {"type": "string"},
+        "column_name": {"type": "string"}
+      },
+      "required": ["entity", "entity_name", "attributes"],
+      "additionalProperties": false
+    },
+    "constraint": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "constraint"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {
+          "type": "object",
+          "oneOf": [
+            {
+              "properties": {
+                "columns": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "minItems": 1
+                },
+                "constraint_name": {"type": "string"},
+                "constraint_type": {"const": "UNIQUE"}
+              },
+              "required": ["columns", "constraint_name", "constraint_type"],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "constraint_name": {"type": "string"},
+                "constraint_type": {"const": "CHECK"},
+                "check_clause": {"type": "string", "minLength": 1}
+              },
+              "required": ["constraint_name", "constraint_type", "check_clause"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "schema_name": {"type": "string"},
+        "table_name": {"type": "string"}
+      },
+      "required": ["entity", "entity_name", "attributes"],
+      "additionalProperties": false
+    },
+    "relation": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "relation"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {
+          "type": "object",
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 1
+            },
+            "constraint_name": {"type": "string"},
+            "constraint_type": {"const": "FOREIGN KEY"},
+            "related_schema": {"type": "string"},
+            "related_table": {"type": "string"},
+            "related_columns": {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 1
+            },
+            "on_delete": {"$ref": "#/$defs/fk_action"},
+            "on_update": {"$ref": "#/$defs/fk_action"},
+            "deferrable": {"const": true},
+            "initially_deferred": {"const": true}
+          },
+          "required": ["columns", "related_schema", "related_table", "related_columns"],
+          "additionalProperties": false
+        },
+        "schema_name": {"type": "string"},
+        "table_name": {"type": "string"}
+      },
+      "required": ["entity", "entity_name", "attributes"],
+      "additionalProperties": false
+    },
+    "index": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "index"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {
+          "type": "object",
+          "properties": {
+            "index_name": {"type": "string"},
+            "columns": {
+              "type": "object",
+              "additionalProperties": {"type": ["string", "null"]}
+            },
+            "with_options": {"type": "object"},
+            "method": {"type": "string"},
+            "unique": {"const": true},
+            "tablespace": {"type": "string"},
+            "where": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "schema_name": {"type": "string"},
+        "table_name": {"type": "string"}
+      },
+      "required": ["entity", "entity_name", "attributes"],
+      "additionalProperties": false
+    },
+    "extension": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "extension"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {"type": "object"}
+      },
+      "required": ["entity", "entity_name"],
+      "additionalProperties": false
+    },
+    "event_trigger": {
+      "type": "object",
+      "properties": {
+        "entity": {"const": "event_trigger"},
+        "entity_name": {"type": "string", "minLength": 1},
+        "attributes": {"type": "object"}
+      },
+      "required": ["entity", "entity_name"],
+      "additionalProperties": false
+    }
+  }
+}

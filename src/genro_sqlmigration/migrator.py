@@ -215,10 +215,15 @@ class SqlMigrator(DiffMixin, CommandBuilderMixin, ExecutorMixin):
 
         The package has no ORM extractor by design: the producer builds
         the normalized JSON and assigns it to ``ormStructure`` before
-        running the migration. This hook only guarantees the attribute
-        is a dict when nothing was injected.
+        running the migration. This hook guarantees the attribute is a
+        dict and strips the optional ``format_version`` envelope key
+        (validated at the boundary, never diffed).
         """
         self.ormStructure = self.ormStructure or {}
+        if 'format_version' in self.ormStructure:
+            self.ormStructure = {
+                k: v for k, v in self.ormStructure.items() if k == 'root'
+            }
 
     def extractSql(self, schemas=None):
         """Extract the JSON structure from the actual database.

@@ -16,6 +16,18 @@ class NonExistingDbException(SqlMigrationError):
     """Raised when the target database does not exist yet."""
 
 
+class SqlValidationError(SqlMigrationError):
+    """Raised when a normalized JSON structure violates the contract.
+
+    Carries the full list of problems found, so producers can fix
+    them all in one pass.
+    """
+
+    def __init__(self, errors):
+        self.errors = list(errors)
+        super().__init__('\n'.join(self.errors))
+
+
 class SqlConnectionException(SqlMigrationError):
     """Raised when the database server is unreachable or the connection
     fails for reasons other than a non-existing database (e.g. wrong
