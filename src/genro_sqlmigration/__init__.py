@@ -24,6 +24,8 @@ Main components:
 """
 
 from genro_sqlmigration.adapters import (
+    MssqlAdapter,
+    MssqlDatabase,
     MysqlAdapter,
     MysqlDatabase,
     PgAdapter,
@@ -48,6 +50,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "FORMAT_VERSION",
+    "MssqlAdapter",
+    "MssqlDatabase",
     "MysqlAdapter",
     "MysqlDatabase",
     "PgAdapter",

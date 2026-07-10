@@ -51,6 +51,9 @@ postgresql = [
 mysql = [
     "pymysql",
 ]
+mssql = [
+    "pymssql",
+]
 validation = [
     "jsonschema>=4.18",
 ]
