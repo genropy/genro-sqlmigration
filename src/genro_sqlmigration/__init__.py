@@ -33,11 +33,14 @@ from genro_sqlmigration.adapters import (
     SqliteAdapter,
     SqliteDatabase,
 )
+from genro_sqlmigration.json_producer import JsonStructureProducer
 from genro_sqlmigration.migrator import SqlMigrator
 from genro_sqlmigration.structures import (
     FORMAT_VERSION,
     new_column_item,
     new_constraint_item,
+    new_event_trigger_item,
+    new_extension_item,
     new_index_item,
     new_relation_item,
     new_schema_item,
@@ -50,6 +53,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "FORMAT_VERSION",
+    "JsonStructureProducer",
     "MssqlAdapter",
     "MssqlDatabase",
     "MysqlAdapter",
@@ -62,6 +66,8 @@ __all__ = [
     "StructureValidator",
     "new_column_item",
     "new_constraint_item",
+    "new_event_trigger_item",
+    "new_extension_item",
     "new_index_item",
     "new_relation_item",
     "new_schema_item",
