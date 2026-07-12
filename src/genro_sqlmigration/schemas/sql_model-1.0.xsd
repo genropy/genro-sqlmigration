@@ -61,12 +61,27 @@
     </xs:restriction>
   </xs:simpleType>
 
-  <!-- ==== relation (child of a column) ================================= -->
+  <!-- ==== relation (foreign key) ======================================= -->
+
+  <!-- A single target column of a multi-column FK. -->
+  <xs:complexType name="to">
+    <xs:attribute name="schema" type="xs:string" use="required"/>
+    <xs:attribute name="table" type="xs:string" use="required"/>
+    <xs:attribute name="column" type="xs:string" use="required"/>
+  </xs:complexType>
 
   <xs:complexType name="relation">
     <!-- Physical FK only in this clean schema: foreign_key is implied.
-         'to' is the target column as schema.table.column. -->
-    <xs:attribute name="to" type="xs:string" use="required"/>
+         Single-column form (nested in a column): the 'to' attribute is the
+         target column as schema.table.column. Multi-column form (child of a
+         table): the 'columns' attribute lists the source columns and each
+         ordered <to> child gives one target column. -->
+    <xs:sequence>
+      <xs:element name="to" type="to" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="to" type="xs:string"/>
+    <xs:attribute name="columns" type="columnList"/>
+    <xs:attribute name="name" type="xs:string"/>
     <xs:attribute name="on_delete" type="fkAction"/>
     <xs:attribute name="on_update" type="fkAction"/>
     <xs:attribute name="deferrable" type="xs:boolean"/>
@@ -101,9 +116,35 @@
     <xs:attribute name="check_clause" type="xs:string"/>
   </xs:complexType>
 
-  <xs:complexType name="index">
+  <xs:simpleType name="sortOrder">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="ASC"/>
+      <xs:enumeration value="DESC"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Generic key/value pair (index WITH options, event-trigger attributes). -->
+  <xs:complexType name="option">
+    <xs:attribute name="key" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string"/>
+  </xs:complexType>
+
+  <!-- One index column with an optional per-column sort order. -->
+  <xs:complexType name="indexColumn">
     <xs:attribute name="name" type="xs:string" use="required"/>
-    <xs:attribute name="columns" type="columnList" use="required"/>
+    <xs:attribute name="sort" type="sortOrder"/>
+  </xs:complexType>
+
+  <xs:complexType name="index">
+    <!-- Columns: either the compact 'columns' attribute (all default sort) or
+         ordered <column> children carrying per-column sort. <option> children
+         are the WITH options. -->
+    <xs:sequence>
+      <xs:element name="column" type="indexColumn" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="option" type="option" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="columns" type="columnList"/>
     <xs:attribute name="unique" type="xs:boolean"/>
     <xs:attribute name="method" type="xs:string"/>
     <xs:attribute name="where" type="xs:string"/>
@@ -115,6 +156,7 @@
   <xs:complexType name="table">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:element name="column" type="column"/>
+      <xs:element name="relation" type="relation"/>
       <xs:element name="constraint" type="constraint"/>
       <xs:element name="index" type="index"/>
     </xs:choice>
@@ -138,6 +180,14 @@
     <xs:attribute name="name" type="xs:string" use="required"/>
   </xs:complexType>
 
+  <!-- Database-level (DDL) trigger; free attributes via <option> children. -->
+  <xs:complexType name="event_trigger">
+    <xs:sequence>
+      <xs:element name="option" type="option" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+  </xs:complexType>
+
   <!-- ==== db (root) ==================================================== -->
 
   <xs:element name="db">
@@ -145,6 +195,7 @@
       <xs:sequence>
         <xs:element name="schema" type="schema" minOccurs="0" maxOccurs="unbounded"/>
         <xs:element name="extension" type="extension" minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="event_trigger" type="event_trigger" minOccurs="0" maxOccurs="unbounded"/>
       </xs:sequence>
       <xs:attribute name="name" type="xs:string" use="required"/>
     </xs:complexType>

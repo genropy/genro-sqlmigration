@@ -20,9 +20,14 @@ Normalization rules applied (producer-guide, physical plane):
 - FK / UNIQUE / index names are the structural hashes computed by the
   factories; boolean attributes arrive as XML strings and are coerced.
 
+Covers the same constructs as the JSON producer: multi-column FK (a
+table-level ``<relation>`` with ordered ``<to>`` children), per-column index
+sort order and WITH options (``<column>``/``<option>`` children), event
+triggers (root ``<event_trigger>``) and optional readable names.
+
 Not yet (raises or skipped, noted for later): FK supporting-index defaults;
-``related_columns`` defaulting to the target pkey when ``to`` omits the
-column (a two-part ``to`` raises); ``size`` min:max re-normalization.
+``related_columns`` defaulting to the target pkey when a single-column ``to``
+omits the column (a two-part ``to`` raises); ``size`` min:max re-normalization.
 """
 
 import xml.etree.ElementTree as ET
@@ -32,6 +37,7 @@ from .structures import (
     COL_JSON_KEYS,
     new_column_item,
     new_constraint_item,
+    new_event_trigger_item,
     new_extension_item,
     new_index_item,
     new_relation_item,
@@ -51,6 +57,12 @@ def _tag(elem):
 def _bool(value):
     """Coerce an XML boolean lexical value to a Python bool."""
     return value is not None and value.lower() in ("true", "1")
+
+
+def _options(elem):
+    """Collect ``<option key= value=>`` children into a key->value dict."""
+    return {opt.get("key"): opt.get("value")
+            for opt in elem if _tag(opt) == "option"}
 
 
 class XmlStructureProducer:
@@ -77,7 +89,15 @@ class XmlStructureProducer:
             elif tag == "extension":
                 name = elem.get("name")
                 root["extensions"][name] = new_extension_item(name)
+            elif tag == "event_trigger":
+                self._add_event_trigger(root, elem)
         return structure
+
+    def _add_event_trigger(self, root, elem):
+        name = elem.get("name")
+        item = new_event_trigger_item(name)
+        item["attributes"].update(_options(elem))
+        root["event_triggers"][name] = item
 
     def _fill_schema(self, root, schema_elem):
         schema_name = schema_elem.get("name")
@@ -101,11 +121,13 @@ class XmlStructureProducer:
             tag = _tag(child)
             if tag == "column":
                 self._fill_column(table, schema_name, table_name, child, pkey_cols)
+            elif tag == "relation":  # table-level (multi-column) FK
+                columns = child.get("columns").split(",")
+                self._add_relation(table, schema_name, table_name, columns, child)
             elif tag == "constraint":
                 self._fill_constraint(table, schema_name, table_name, child)
             elif tag == "index":
-                cols = child.get("columns").split(",")
-                self._add_index(table, schema_name, table_name, cols, child)
+                self._add_index(table, schema_name, table_name, child)
 
     def _fill_column(self, table, schema_name, table_name, col_elem, pkey_cols):
         name = col_elem.get("name")
@@ -130,20 +152,14 @@ class XmlStructureProducer:
             self._add_relation(table, schema_name, table_name, [name], relation)
         # 'indexed' is a flag, not a column attribute: it generates an index.
         if _bool(col_elem.get("indexed")) and name not in pkey_cols:
-            self._add_index(table, schema_name, table_name, [name])
+            self._add_column_index(table, schema_name, table_name, name)
 
     def _add_relation(self, table, schema_name, table_name, columns, rel_elem):
-        parts = rel_elem.get("to").split(".")
-        if len(parts) != 3:
-            raise NotImplementedError(
-                f"relation 'to={rel_elem.get('to')}': target must be "
-                "schema.table.column (pkey defaulting not yet implemented)"
-            )
-        related_schema, related_table, related_column = parts
+        related_schema, related_table, related_columns = self._relation_target(rel_elem)
         attrs = {
             "related_schema": related_schema,
             "related_table": related_table,
-            "related_columns": [related_column],
+            "related_columns": related_columns,
             "constraint_type": "FOREIGN KEY",
         }
         for key in ("on_delete", "on_update"):
@@ -152,8 +168,30 @@ class XmlStructureProducer:
         for key in ("deferrable", "initially_deferred"):
             if _bool(rel_elem.get(key)):
                 attrs[key] = True
-        item = new_relation_item(schema_name, table_name, columns, attributes=attrs)
+        item = new_relation_item(schema_name, table_name, columns, attributes=attrs,
+                                 constraint_name=rel_elem.get("name"))
         table["relations"][item["entity_name"]] = item
+
+    def _relation_target(self, rel_elem):
+        """Resolve the FK target as (related_schema, related_table, columns).
+
+        Single-column form: the ``to="schema.table.column"`` attribute.
+        Multi-column form: ordered ``<to schema table column>`` children, all
+        in the same target table.
+        """
+        to_children = [c for c in rel_elem if _tag(c) == "to"]
+        if to_children:
+            first = to_children[0]
+            return (first.get("schema"), first.get("table"),
+                    [c.get("column") for c in to_children])
+        parts = rel_elem.get("to").split(".")
+        if len(parts) != 3:
+            raise NotImplementedError(
+                f"relation 'to={rel_elem.get('to')}': target must be "
+                "schema.table.column (pkey defaulting not yet implemented)"
+            )
+        related_schema, related_table, related_column = parts
+        return related_schema, related_table, [related_column]
 
     def _fill_constraint(self, table, schema_name, table_name, elem):
         if elem.get("type") == "CHECK":
@@ -164,19 +202,37 @@ class XmlStructureProducer:
             )
         else:
             item = new_constraint_item(
-                schema_name, table_name, elem.get("columns").split(","), "UNIQUE"
+                schema_name, table_name, elem.get("columns").split(","), "UNIQUE",
+                constraint_name=elem.get("name"),
             )
         table["constraints"][item["entity_name"]] = item
 
-    def _add_index(self, table, schema_name, table_name, columns, elem=None):
-        attrs = {"columns": dict.fromkeys(columns)}
-        if elem is not None:
-            if _bool(elem.get("unique")):
-                attrs["unique"] = True
-            for key in ("method", "where", "tablespace"):
-                if elem.get(key):
-                    attrs[key] = elem.get(key)
-        item = new_index_item(schema_name, table_name, columns, attributes=attrs)
+    def _add_index(self, table, schema_name, table_name, elem):
+        col_children = [c for c in elem if _tag(c) == "column"]
+        if col_children:  # ordered children carry per-column sort
+            columns = {c.get("name"): c.get("sort") for c in col_children}
+        else:  # compact form: all default sort
+            columns = dict.fromkeys(elem.get("columns").split(","))
+        attrs = {"columns": columns}
+        if _bool(elem.get("unique")):
+            attrs["unique"] = True
+        for key in ("method", "where", "tablespace"):
+            if elem.get(key):
+                attrs[key] = elem.get(key)
+        with_options = _options(elem)
+        if with_options:
+            attrs["with_options"] = with_options
+        self._store_index(table, schema_name, table_name, list(columns),
+                          attrs, elem.get("name"))
+
+    def _add_column_index(self, table, schema_name, table_name, column_name):
+        """Index generated by a column's ``indexed="true"`` flag."""
+        self._store_index(table, schema_name, table_name, [column_name],
+                          {"columns": {column_name: None}}, None)
+
+    def _store_index(self, table, schema_name, table_name, columns, attrs, name):
+        item = new_index_item(schema_name, table_name, columns,
+                              attributes=attrs, index_name=name)
         table["indexes"][item["entity_name"]] = item
 
 
@@ -189,8 +245,10 @@ def struct_to_xml(structure, indent=True):
     regenerates them), so ``XML → JSON → XML → JSON`` round-trips to the same
     JSON. Feeds the round-trip: a DB introspected to JSON becomes editable XML.
 
-    Not yet: multi-column relations (the clean XSD models one relation per
-    single column) are skipped — noted for the compositeColumn extension.
+    Multi-column relations are emitted as table-level ``<relation>`` with
+    ordered ``<to>`` children; indexes with per-column sort or WITH options use
+    the expanded ``<column>``/``<option>`` child form; event triggers become
+    root ``<event_trigger>`` elements.
     """
     root = structure["root"]
     ET.register_namespace("", NS)
@@ -207,10 +265,13 @@ def struct_to_xml(structure, indent=True):
             t_el = ET.SubElement(s_el, f"{{{NS}}}table", t_attrs)
 
             rel_by_col = {}
+            multi_col_rels = []
             for rel in table.get("relations", {}).values():
                 cols = rel["attributes"].get("columns") or []
                 if len(cols) == 1:
                     rel_by_col[cols[0]] = rel["attributes"]
+                else:
+                    multi_col_rels.append((cols, rel["attributes"]))
 
             for col_name, col in table.get("columns", {}).items():
                 c_attrs = {"name": col_name}
@@ -232,9 +293,21 @@ def struct_to_xml(structure, indent=True):
                             r_attrs[key] = rel[key]
                     ET.SubElement(c_el, f"{{{NS}}}relation", r_attrs)
 
+            for cols, rel in multi_col_rels:
+                r_attrs = {"columns": ",".join(cols)}
+                for key in ("on_delete", "on_update"):
+                    if rel.get(key):
+                        r_attrs[key] = rel[key]
+                r_el = ET.SubElement(t_el, f"{{{NS}}}relation", r_attrs)
+                for target in rel.get("related_columns") or []:
+                    ET.SubElement(r_el, f"{{{NS}}}to", {
+                        "schema": rel["related_schema"],
+                        "table": rel["related_table"],
+                        "column": target})
+
             for constraint in table.get("constraints", {}).values():
                 a = constraint["attributes"]
-                c_attrs = {"name": constraint["entity_name"],
+                c_attrs = {"name": a["constraint_name"],
                            "type": a["constraint_type"]}
                 if a["constraint_type"] == "CHECK":
                     c_attrs["check_clause"] = a["check_clause"]
@@ -244,16 +317,35 @@ def struct_to_xml(structure, indent=True):
 
             for index in table.get("indexes", {}).values():
                 a = index["attributes"]
-                i_attrs = {"name": index["entity_name"],
-                           "columns": ",".join((a.get("columns") or {}).keys())}
+                columns = a.get("columns") or {}
+                with_options = a.get("with_options") or {}
+                i_attrs = {"name": a["index_name"]}
                 if a.get("unique"):
                     i_attrs["unique"] = "true"
                 if a.get("method"):
                     i_attrs["method"] = a["method"]
-                ET.SubElement(t_el, f"{{{NS}}}index", i_attrs)
+                # sort order or WITH options need the expanded child form
+                if any(columns.values()) or with_options:
+                    i_el = ET.SubElement(t_el, f"{{{NS}}}index", i_attrs)
+                    for col_name, sort in columns.items():
+                        c = {"name": col_name}
+                        if sort:
+                            c["sort"] = sort
+                        ET.SubElement(i_el, f"{{{NS}}}column", c)
+                    for key, value in with_options.items():
+                        ET.SubElement(i_el, f"{{{NS}}}option",
+                                      {"key": key, "value": value})
+                else:
+                    i_attrs["columns"] = ",".join(columns)
+                    ET.SubElement(t_el, f"{{{NS}}}index", i_attrs)
 
     for ext_name in root.get("extensions", {}):
         ET.SubElement(db, f"{{{NS}}}extension", {"name": ext_name})
+
+    for trigger_name, trigger in root.get("event_triggers", {}).items():
+        et_el = ET.SubElement(db, f"{{{NS}}}event_trigger", {"name": trigger_name})
+        for key, value in trigger.get("attributes", {}).items():
+            ET.SubElement(et_el, f"{{{NS}}}option", {"key": key, "value": value})
 
     if indent:
         ET.indent(db)

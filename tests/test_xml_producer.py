@@ -4,8 +4,10 @@
 """XML producer tests: a clean SQL-model XML projects to valid migrator JSON."""
 
 from genro_sqlmigration import StructureValidator
+from genro_sqlmigration.json_producer import JsonStructureProducer
 from genro_sqlmigration.structures import json_equal
 from genro_sqlmigration.xml_producer import XmlStructureProducer, struct_to_xml
+from tests.test_json_producer import MULTICOL_JSON, NAMED_JSON
 
 RECIPE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <db xmlns="urn:genro:sql-model:1.0" name="testdb">
@@ -89,3 +91,123 @@ def test_struct_to_xml_is_valid_against_producer():
     struct1 = XmlStructureProducer(RECIPE_XML).get_json_struct()
     xml2 = struct_to_xml(struct1)
     StructureValidator().validate(XmlStructureProducer(xml2).get_json_struct())
+
+
+# --- hard-gap constructs: XML twin of MULTICOL_JSON (the JSON oracle) --------
+
+# Equivalent of tests.test_json_producer.MULTICOL_JSON: multi-column FK
+# (table-level <relation> with <to> children), an index with per-column sort
+# and WITH options (<column>/<option> children), and a root event trigger.
+MULTICOL_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<db xmlns="urn:genro:sql-model:1.0" name="hg">
+  <schema name="s">
+    <table name="parent" pkey="a,b">
+      <column name="a" dtype="I"/>
+      <column name="b" dtype="I"/>
+    </table>
+    <table name="child" pkey="id">
+      <column name="id" dtype="serial"/>
+      <column name="pa" dtype="I"/>
+      <column name="pb" dtype="I"/>
+      <column name="created" dtype="D"/>
+      <relation columns="pa,pb">
+        <to schema="s" table="parent" column="a"/>
+        <to schema="s" table="parent" column="b"/>
+      </relation>
+      <index>
+        <column name="pa"/>
+        <column name="created" sort="DESC"/>
+        <option key="fillfactor" value="70"/>
+      </index>
+    </table>
+  </schema>
+  <event_trigger name="audit_ddl">
+    <option key="event" value="ddl_command_end"/>
+  </event_trigger>
+</db>
+"""
+
+
+def test_hard_gaps_converge_with_json_twin():
+    """The XML hard-gap constructs reach the same internal form as the JSON."""
+    from_xml = XmlStructureProducer(MULTICOL_XML).get_json_struct()
+    from_json = JsonStructureProducer(MULTICOL_JSON).get_json_struct()
+    assert json_equal(from_xml, from_json)
+
+
+def test_multicolumn_fk_from_xml():
+    child = (XmlStructureProducer(MULTICOL_XML).get_json_struct()
+             ["root"]["schemas"]["s"]["tables"]["child"])
+    rel = list(child["relations"].values())[0]
+    assert rel["attributes"]["columns"] == ["pa", "pb"]
+    assert rel["attributes"]["related_columns"] == ["a", "b"]
+    assert rel["entity_name"].startswith("fk_")
+
+
+def test_index_sort_and_options_from_xml():
+    child = (XmlStructureProducer(MULTICOL_XML).get_json_struct()
+             ["root"]["schemas"]["s"]["tables"]["child"])
+    index = list(child["indexes"].values())[0]
+    columns = index["attributes"]["columns"]
+    assert columns == {"pa": None, "created": "DESC"}
+    assert list(columns.keys()) == ["pa", "created"]
+    assert index["attributes"]["with_options"] == {"fillfactor": "70"}
+
+
+def test_event_trigger_from_xml():
+    triggers = XmlStructureProducer(MULTICOL_XML).get_json_struct()["root"]["event_triggers"]
+    assert triggers["audit_ddl"]["attributes"]["event"] == "ddl_command_end"
+
+
+def test_hard_gaps_roundtrip():
+    struct1 = XmlStructureProducer(MULTICOL_XML).get_json_struct()
+    struct2 = XmlStructureProducer(struct_to_xml(struct1)).get_json_struct()
+    assert json_equal(struct1, struct2)
+
+
+def test_hard_gaps_validate():
+    StructureValidator().validate(XmlStructureProducer(MULTICOL_XML).get_json_struct())
+
+
+# --- optional names: XML twin of NAMED_JSON ---------------------------------
+
+# Equivalent of tests.test_json_producer.NAMED_JSON: an explicit name on a
+# relation / UNIQUE / index becomes the readable name; the key stays the hash.
+NAMED_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<db xmlns="urn:genro:sql-model:1.0" name="nm">
+  <schema name="s">
+    <table name="author" pkey="id">
+      <column name="id" dtype="serial"/>
+    </table>
+    <table name="recipe" pkey="id">
+      <column name="id" dtype="serial"/>
+      <column name="title" dtype="A" size="0:80"/>
+      <column name="author_id" dtype="I">
+        <relation to="s.author.id" name="fk_recipe_author"/>
+      </column>
+      <constraint name="uq_title" type="UNIQUE" columns="title"/>
+      <index name="idx_title" columns="title"/>
+    </table>
+  </schema>
+</db>
+"""
+
+
+def test_named_entities_converge_with_json_twin():
+    from_xml = XmlStructureProducer(NAMED_XML).get_json_struct()
+    from_json = JsonStructureProducer(NAMED_JSON).get_json_struct()
+    assert json_equal(from_xml, from_json)
+
+
+def test_named_entities_carry_readable_name_key_stays_hash_from_xml():
+    recipe = (XmlStructureProducer(NAMED_XML).get_json_struct()
+              ["root"]["schemas"]["s"]["tables"]["recipe"])
+    (rel_key, rel), = recipe["relations"].items()
+    assert rel["attributes"]["constraint_name"] == "fk_recipe_author"
+    assert rel_key == rel["entity_name"] and rel_key.startswith("fk_")
+    (cst_key, cst), = recipe["constraints"].items()
+    assert cst["attributes"]["constraint_name"] == "uq_title"
+    assert cst_key == cst["entity_name"] and cst_key.startswith("cst_")
+    (idx_key, idx), = recipe["indexes"].items()
+    assert idx["attributes"]["index_name"] == "idx_title"
+    assert idx_key == idx["entity_name"] and idx_key.startswith("idx_")
