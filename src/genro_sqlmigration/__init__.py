@@ -48,6 +48,7 @@ from genro_sqlmigration.structures import (
     new_table_item,
 )
 from genro_sqlmigration.validation import StructureValidator
+from genro_sqlmigration.xml_producer import XmlStructureProducer, struct_to_xml
 
 __version__ = "0.1.0"
 
@@ -64,6 +65,7 @@ __all__ = [
     "SqliteDatabase",
     "SqlMigrator",
     "StructureValidator",
+    "XmlStructureProducer",
     "new_column_item",
     "new_constraint_item",
     "new_event_trigger_item",
@@ -73,4 +75,5 @@ __all__ = [
     "new_schema_item",
     "new_structure_root",
     "new_table_item",
+    "struct_to_xml",
 ]

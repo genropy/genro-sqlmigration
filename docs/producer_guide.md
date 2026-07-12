@@ -240,7 +240,7 @@ XML-specific notes:
   quickstart:
 
 ```python
-from genro_sqlmigration.xml_producer import XmlStructureProducer
+from genro_sqlmigration import XmlStructureProducer
 
 structure = XmlStructureProducer(xml_text).get_json_struct()
 # or XmlStructureProducer.from_file(path)
