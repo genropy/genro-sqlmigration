@@ -1,160 +1,326 @@
-# Producer Guide — building the normalized JSON (contract v1.0)
+# Producer Guide — describing your database
 
-**Status**: 🔴 DA REVISIONARE · **Contract**: `format_version = "1.0"`
-(JSON Schema: `src/genro_sqlmigration/schemas/structure-1.0.json`)
+**Contract**: `format_version = "1.0"`
 
-genro-sqlmigration is ORM-agnostic: it never reads your model. A
-**producer** (your ORM extractor) projects the model into the
-normalized JSON described here and injects it into the migrator:
+genro-sqlmigration is ORM-agnostic: it never reads your model. You
+describe the desired database in one of three input formats, the
+library compares it against the live database and generates (or
+applies) the realignment SQL.
 
-```python
-from genro_sqlmigration import SqlMigrator, StructureValidator
+The three doors, from the friendliest to the most technical:
 
-structure = my_extractor.get_json_struct()      # {'root': {...}}
-migrator = SqlMigrator(db)                      # db: your Database facade
-migrator.ormStructure = StructureValidator().validate(structure)
-migrator.prepareMigrationCommands()
-print(migrator.getChanges())                    # or migrator.applyChanges()
-```
+1. **Human JSON** — a readable JSON document with names and lists
+   (no hashes). Compiled by `JsonStructureProducer`.
+2. **XML** — the same information in XML, validated by the packaged
+   XSD (`sql_model-1.0.xsd`); ideal for editors and GUIs. Compiled by
+   `XmlStructureProducer`.
+3. **Normalized JSON** — the internal contract itself, built with the
+   `new_*_item` factories. For producers that need full control
+   (e.g. an ORM extractor).
 
-`validate()` normalizes missing containers, checks the structure
-against the packaged JSON Schema (when the `validation` extra is
-installed) plus the semantic rules a schema cannot express, and strips
-the optional top-level `format_version` key.
+The two external formats are equivalent: the same model expressed in
+human JSON or XML compiles to the identical internal structure. Both
+compilers are thin front-ends over the same factories, so every
+normalization rule below applies to both.
 
-A complete, tested reference producer lives in
-`tests/support/orm_producer.py` (it ports the legacy Genropy
-`orm_extractor` rules); the reference `Database`/`BaseAdapter`
-implementation over psycopg 3 lives in `tests/support/pg_database.py`.
-
-## 1. Shape
-
-Build with the factories from `genro_sqlmigration`:
+## 1. End-to-end quickstart (human JSON)
 
 ```python
 from genro_sqlmigration import (
-    new_structure_root, new_schema_item, new_table_item, new_column_item,
-    new_constraint_item, new_relation_item, new_index_item,
+    JsonStructureProducer, PgDatabase, SqlMigrator, StructureValidator,
 )
 
-structure = new_structure_root('mydb')          # {'root': {...}}
-schemas = structure['root']['schemas']
-schemas['alfa'] = new_schema_item('alfa')
-table = new_table_item('alfa', 'alfa_recipe')
-table['attributes']['pkeys'] = 'id'             # comma-joined physical columns
-schemas['alfa']['tables']['alfa_recipe'] = table
-table['columns']['id'] = new_column_item(
-    'alfa', 'alfa_recipe', 'id', attributes={'dtype': 'serial', 'notnull': '_auto_'}
-)
+model = {
+    "db": "mydb",
+    "schemas": [
+        {
+            "name": "public",
+            "tables": [
+                {
+                    "name": "author", "pkey": "id",
+                    "columns": [
+                        {"name": "id", "dtype": "serial"},
+                        {"name": "name", "dtype": "A", "size": "0:120",
+                         "notnull": True},
+                    ],
+                },
+                {
+                    "name": "recipe", "pkey": "id",
+                    "columns": [
+                        {"name": "id", "dtype": "serial"},
+                        {"name": "title", "dtype": "A", "size": "0:80",
+                         "notnull": True},
+                        {"name": "author_id", "dtype": "L"},
+                    ],
+                    "relations": [
+                        {"columns": ["author_id"],
+                         "related_schema": "public",
+                         "related_table": "author",
+                         "related_columns": ["id"],
+                         "on_delete": "CASCADE"},
+                    ],
+                    "indexes": [{"columns": ["title"]}],
+                },
+            ],
+        },
+    ],
+}
+
+structure = JsonStructureProducer(model).get_json_struct()
+
+db = PgDatabase({"dbname": "mydb", "host": "localhost"},
+                application_schemas=["public"])
+migrator = SqlMigrator(db)
+migrator.ormStructure = StructureValidator().validate(structure)
+migrator.prepareMigrationCommands()
+print(migrator.getChanges())        # review the SQL...
+# migrator.applyChanges()           # ...or apply it
 ```
 
-Hierarchy: `root` → `schemas` → `tables` → `columns` / `relations` /
-`constraints` / `indexes`; `extensions` and `event_triggers` live at
-root level. Every entity carries `entity`, `entity_name`,
-`attributes`.
+`JsonStructureProducer` also accepts a JSON string or a file
+(`JsonStructureProducer.from_file(path)`). Swap `PgDatabase` for
+`SqliteDatabase`, `MysqlDatabase` or `MssqlDatabase` for the other
+dialects (each needs its driver extra — see the README).
 
-## 2. Attribute cleaning is normative (and lossy)
+`StructureValidator().validate()` checks the compiled structure against
+the packaged JSON Schema (with the `validation` extra installed) plus
+the semantic rules a schema cannot express.
 
-The factories strip attributes whose value is `None`, `False`, `{}`,
-`[]`, `''` or `'NO ACTION'`. Consequence: the format cannot
-distinguish "not specified" from "explicitly default" — **never emit
-default-valued attributes**. Anything you set after a factory call
-bypasses cleaning: set only meaningful values.
+## 2. The human JSON format
 
-## 3. Column rules
+Top level:
 
-Allowed attributes (`COL_JSON_KEYS`): `dtype`, `sql_type`, `notnull`,
-`sqldefault`, `size`, `unique`, `extra_sql`, `generated_expression`,
-`comment`. `sql_type` is the native-type escape hatch.
+```text
+{
+  "db": "<database name>",
+  "schemas":        [ {"name": "...", "tables": [ ... ]} ],
+  "extensions":     [ "unaccent" ],
+  "event_triggers": [ {"name": "audit_ddl",
+                       "attributes": {"event": "ddl_command_end"}} ]
+}
+```
 
-- **dtype codes** (closed set): `A B C D DH DHZ DT H HZ I L M N O P R
-  T TSV VEC X Z jsonb serial`. Normalize ORM-internal types yourself:
-  the legacy converter maps `X`/`Z`/`P` → `T`.
-- **dtype defaults**: no dtype → `'A'` if a size is present, else `'T'`.
-- **size normalization** (what the DB introspection will report back):
-  - `':N'` → `'0:N'` and dtype `A` (varchar);
-  - `'min:max'` → force min to 0 (`'0:max'`): the DB cannot know the min;
-  - plain `'N'` with a text dtype (`A`/`T`/`X`/`Z`/`P` or none) → dtype
-    `C` (char);
-  - `'N'` with dtype `N` → size `'N,0'`; decimals stay `'p,s'`;
-  - `A`/`C` without size → `T` (char without length is impossible).
+`extensions` and `event_triggers` are optional (PostgreSQL-oriented).
 
-## 4. Primary keys
+### Table
 
-- `table['attributes']['pkeys']` is the comma-joined list of
-  **physical** column names (expand composite members yourself).
-- Every pkey column gets `notnull='_auto_'`.
-- Single-column PK: drop a redundant `unique=True` on that column.
-- Composite PK: **keep** per-column `unique=True` (the PK tuple does
-  not imply per-column uniqueness — legacy issue #580).
-- Pkey columns get no separate index (the PK already creates one).
+```text
+{
+  "name": "recipe",
+  "pkey": "id",                  // comma-joined for composite: "a,b"
+  "comment": "Recipes",
+  "columns":     [ ... ],
+  "relations":   [ ... ],        // foreign keys
+  "constraints": [ ... ],        // UNIQUE / CHECK
+  "indexes":     [ ... ]
+}
+```
 
-## 5. Foreign keys (relations)
+Primary-key handling is automatic: every `pkey` column becomes
+`notnull` (`'_auto_'`), and a single-column PK drops a redundant
+`unique` on that column.
 
-Only **physical** relations project into the JSON; logical/navigable
-relations are producer-side concepts.
+### Column
 
-- Key and `entity_name`: the structural hash
-  `hashed_name(schema, table, columns, obj_type='fk')` (`fk_*`).
-  Never change the hash function.
-- Attributes: `columns`, `related_schema`, `related_table`,
-  `related_columns`, `constraint_name` (= the hash), `constraint_type
-  = "FOREIGN KEY"`, optional `on_delete`/`on_update` (never emit
-  `NO ACTION`), `deferrable`/`initially_deferred` (only `True`).
-- Legacy defaults worth replicating: `ON UPDATE CASCADE` on every FK;
-  `SET NULL` delete actions imply deferrable + initially deferred.
-- The FK **source** columns always get a supporting index (unless in
-  the pkey or unique).
-- FK to a **non-PK** target: also emit an index on the target
-  column(s) of the related table (legacy oracle `test_06c`).
+```json
+{"name": "title", "dtype": "A", "size": "0:80", "notnull": true}
+```
 
-## 6. Indexes
+Accepted attributes: `dtype`, `size`, `notnull`, `sqldefault`,
+`unique`, `sql_type`, `extra_sql`, `generated_expression`, `comment`.
+Anything else is ignored. `sql_type` is the native-type escape hatch
+(emitted verbatim in the DDL).
 
-- Key and `entity_name`: `hashed_name(..., obj_type='idx')` (`idx_*`).
-- Attributes: `columns` as an ordered dict `{name: 'DESC'|None}`,
-  optional `method`, `unique`, `with_options`, `tablespace`, `where`,
-  `index_name` (= the hash).
-- Columns with `unique=True` get no index (the constraint creates one).
-- Per-dtype defaults: `TSV` columns always get a GIN index, even
-  without `indexed=True`; an explicit method wins (legacy #629).
+If `dtype` is missing: `'A'` when a `size` is present, `'T'`
+otherwise.
 
-## 7. UNIQUE and CHECK constraints
+### Relation (foreign key)
 
-- Multi-column UNIQUE: key/`entity_name` = `hashed_name(...,
-  obj_type='cst')` (`cst_*`); attributes `columns`, `constraint_name`,
-  `constraint_type="UNIQUE"`. Single-column unique is a **column
-  attribute**, not a constraint entity.
-- CHECK: key/`entity_name` = the **user-given** constraint name;
-  attributes `constraint_name`, `constraint_type="CHECK"`,
-  `check_clause`. Write the clause **as PostgreSQL prints it** (e.g.
-  `(rating >= 0)`, with outer parentheses and explicit casts) so it
-  compares clean against introspection — interim rule until the
-  canonicalization probe lands (roadmap doc `05` §3).
+```json
+{"columns": ["author_id"],
+ "related_schema": "public", "related_table": "author",
+ "related_columns": ["id"],
+ "on_delete": "CASCADE",              // optional; never emit NO ACTION
+ "name": "fk_recipe_author"}          // optional readable name
+```
 
-## 8. Comments
+`columns` and `related_columns` are lists — a multi-column FK is just
+a longer list (positional pairing). Optional flags: `on_update`,
+`deferrable`, `initially_deferred` (emit only when true).
 
-- Column comment: the `comment` column attribute.
-- Table comment: `table['attributes']['comment']`.
-- Emitted as `COMMENT ON` idempotent replaces; removing the attribute
-  clears the comment (`IS NULL`).
+### Constraint
 
-## 9. Extensions
+```json
+{"type": "UNIQUE", "columns": ["title", "author_id"], "name": "uq_t_a"}
+{"type": "CHECK", "name": "ck_recipe_title",
+ "check_clause": "(char_length(title) > 0)"}
+```
 
-Emit an extension item per required PostgreSQL extension:
-`structure['root']['extensions'][name] = new_extension_item(name)`.
-Generated SQL is `CREATE EXTENSION IF NOT EXISTS` — never dropped,
-never recreated.
+`name` is optional for UNIQUE, **required** for CHECK. Write the CHECK
+clause as PostgreSQL prints it (outer parentheses, explicit casts) so
+it compares clean against introspection. Single-column uniqueness is
+the column attribute `unique`, not a constraint.
 
-## 10. Re-injection rule
+### Index
 
-Command handlers mark transient state on the injected JSON (e.g.
-`_rebuilt` on a column rebuilt via DROP+ADD). **Build and inject a
-fresh structure before every** `prepareMigrationCommands()` — do not
-reuse a structure that already went through a migration run.
+```json
+{"columns": ["title"]}                              // plain list
+{"columns": {"pa": null, "created": "DESC"},        // per-column sort
+ "unique": true, "method": "btree",
+ "with_options": {"fillfactor": "70"},
+ "where": "created > '2020-01-01'",
+ "name": "idx_recent"}                              // optional name
+```
 
-## Riferimenti
+`columns` is either a list (all default sort) or an ordered map
+`name → null | "DESC"`. `with_options` is passed through to the
+dialect writer.
 
-- Contract notes and versioning policy: `roadmap/04_json_contract_notes.md`.
-- Extended entities (views, functions, triggers, types, sequences):
-  `roadmap/05_extended_entities.md`.
-- JSON Schema: `src/genro_sqlmigration/schemas/structure-1.0.json`.
+### Optional names
+
+An explicit `name` on a relation / UNIQUE / index becomes the entity's
+readable SQL name. Internally the entity is always keyed by a
+structural hash computed from schema + table + columns — two models
+that differ only in names produce the same keys, so renaming never
+causes spurious diffs (`SqlMigrator` ignores name differences by
+default, `ignore_constraint_name=True`).
+
+## 3. The XML format
+
+The same model, XSD-validated (`src/genro_sqlmigration/schemas/
+sql_model-1.0.xsd`, namespace `urn:genro:sql-model:1.0`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<db xmlns="urn:genro:sql-model:1.0" name="mydb">
+  <schema name="public">
+    <table name="author" pkey="id">
+      <column name="id" dtype="serial"/>
+      <column name="name" dtype="A" size="0:120" notnull="true"/>
+    </table>
+    <table name="recipe" pkey="id">
+      <column name="id" dtype="serial"/>
+      <column name="title" dtype="A" size="0:80" notnull="true"/>
+      <column name="author_id" dtype="L">
+        <relation to="public.author.id" on_delete="CASCADE"/>
+      </column>
+      <!-- multi-column FK: table-level, ordered <to> children -->
+      <relation columns="pa,pb" name="fk_pair">
+        <to schema="s" table="parent" column="a"/>
+        <to schema="s" table="parent" column="b"/>
+      </relation>
+      <constraint type="UNIQUE" columns="title,author_id"/>
+      <constraint type="CHECK" name="ck_recipe_title"
+                  check_clause="(char_length(title) &gt; 0)"/>
+      <index columns="title"/>
+      <index name="idx_recent" unique="true">
+        <column name="pa"/>
+        <column name="created" sort="DESC"/>
+        <option key="fillfactor" value="70"/>
+      </index>
+    </table>
+  </schema>
+  <extension name="unaccent"/>
+  <event_trigger name="audit_ddl">
+    <option key="event" value="ddl_command_end"/>
+  </event_trigger>
+</db>
+```
+
+XML-specific notes:
+
+- a single-column FK nests `<relation to="schema.table.column">` inside
+  its column; a multi-column FK is a table-level `<relation>` with a
+  `columns` attribute and ordered `<to>` children;
+- `indexed="true"` on a column is a shortcut that generates a
+  single-column index;
+- `<option key value>` children carry free key/value pairs (index WITH
+  options, event-trigger attributes);
+- compile with `XmlStructureProducer` and the flow is identical to the
+  quickstart:
+
+```python
+from genro_sqlmigration.xml_producer import XmlStructureProducer
+
+structure = XmlStructureProducer(xml_text).get_json_struct()
+# or XmlStructureProducer.from_file(path)
+```
+
+The inverse, `struct_to_xml(structure)`, de-normalizes an internal
+structure (e.g. introspected from a live DB) back into editable XML.
+
+## 4. dtype reference
+
+Closed set of normalized type codes (PostgreSQL rendering shown; each
+dialect writer maps them to its native equivalents):
+
+| dtype | SQL type (PostgreSQL) | dtype | SQL type (PostgreSQL) |
+| --- | --- | --- | --- |
+| `A` | character varying(size) | `L` | bigint |
+| `B` | boolean | `M` | money |
+| `C` | character(size) | `N` | numeric(p,s) |
+| `D` | date | `O` | bytea |
+| `DH` | timestamp without time zone | `R` | real |
+| `DHZ` | timestamp with time zone | `T` | text |
+| `DT` | interval | `TSV` | tsvector |
+| `H` | time without time zone | `VEC` | vector |
+| `HZ` | time with time zone | `X`, `Z`, `P` | text |
+| `I` | integer | `jsonb` | jsonb |
+| `serial` | serial8 | | |
+
+Size conventions: `'0:80'` = varchar(80); `'10'` with a char dtype =
+char(10); `'12,2'` = numeric(12,2).
+
+## 5. What NOT to emit (attribute cleaning)
+
+The compilers strip attributes whose value is `None`, `False`, `{}`,
+`[]`, `''` or `'NO ACTION'`. The format cannot distinguish "not
+specified" from "explicitly default", so **never emit default-valued
+attributes**: no `notnull: false`, no `on_delete: "NO ACTION"`, no
+empty strings. Emit an attribute only when it carries a non-default
+value.
+
+## 6. The normalized contract (advanced)
+
+The compiled form — what `get_json_struct()` returns and
+`StructureValidator` checks (JSON Schema:
+`src/genro_sqlmigration/schemas/structure-1.0.json`):
+
+- Hierarchy: `root` → `schemas` → `tables` → `columns` / `relations` /
+  `constraints` / `indexes`; `extensions` and `event_triggers` at root.
+  Every entity carries `entity`, `entity_name`, `attributes`.
+- FK / UNIQUE / index dict keys and `entity_name` are the structural
+  hashes `fk_*` / `cst_*` / `idx_*` (`hashed_name(schema, table,
+  columns, obj_type)`). CHECK constraints are keyed by their required
+  user-given name.
+- `table['attributes']['pkeys']` is the comma-joined physical column
+  list; pkey columns carry `notnull='_auto_'`.
+- Index `columns` is an ordered map `{name: 'DESC'|None}`; the hash is
+  computed on the column names only.
+- An explicit readable name lives in `constraint_name` / `index_name`;
+  the key stays the hash.
+
+Producers that need full control build this form directly with the
+factories exported by the package (`new_structure_root`,
+`new_schema_item`, `new_table_item`, `new_column_item`,
+`new_relation_item`, `new_constraint_item`, `new_index_item`,
+`new_extension_item`, `new_event_trigger_item`) — the compilers
+themselves are ~150-line reference producers. A complete ORM-side
+producer lives in `tests/support/orm_producer.py`.
+
+## 7. Re-injection rule
+
+Command handlers mark transient state on the injected structure.
+**Build and inject a fresh structure before every**
+`prepareMigrationCommands()` — never reuse a structure that already
+went through a migration run.
+
+## References
+
+- JSON Schema (normalized contract):
+  `src/genro_sqlmigration/schemas/structure-1.0.json`
+- XSD (external XML format):
+  `src/genro_sqlmigration/schemas/sql_model-1.0.xsd`
+- Reference producers: `src/genro_sqlmigration/json_producer.py`,
+  `src/genro_sqlmigration/xml_producer.py`,
+  `tests/support/orm_producer.py`
