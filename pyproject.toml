@@ -81,6 +81,11 @@ all = [
     "genro-sqlmigration[dev,docs,postgresql]",
 ]
 
+[project.scripts]
+# The migrator CLI drives a live database, so it needs the postgresql extra
+# (psycopg) at runtime: install genro-sqlmigration[postgresql].
+genro-sqlmigrate = "genro_sqlmigration.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/genropy/genro-sqlmigration"
 Documentation = "https://genro-sqlmigration.readthedocs.io"
