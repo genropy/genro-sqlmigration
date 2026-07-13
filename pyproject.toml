@@ -57,6 +57,10 @@ mssql = [
 validation = [
     "jsonschema>=4.18",
 ]
+app = [
+    "genro-asgi>=0.13.0",
+    "genro-tytx>=0.9.3",  # <=0.9.2 NameErrors without orjson (genro-tytx#37)
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
